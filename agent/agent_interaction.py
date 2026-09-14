@@ -20,8 +20,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from strands import Agent, tool
-from strands.models.bedrock import BedrockModel
 from strands.models.ollama import OllamaModel
+from strands.models.openai import OpenAIModel
 from accounts.home import load_home
 from accounts.trips import (LOCAL_TIME_FORMATS, local_label, no_home as _no_home, parse_event_time as _parse_start,
                             parse_local_time, plan_leave_by, transit_geocode, transit_router)
@@ -671,13 +671,20 @@ def make_route_tools(log: RouteLog) -> list:
 
 
 def make_model(model_id: str | None = None, region: str | None = None):
-    """Amazon Bedrock when a model id is configured (YOHO_AGENT_MODEL), else local Ollama.
+    """Amazon Bedrock Mantle when a model id is configured (YOHO_AGENT_MODEL), else local Ollama.
 
-    Bedrock credentials come from boto3's usual chain (env keys, AWS_PROFILE, or the
-    instance role) and need bedrock:InvokeModel / InvokeModelWithResponseStream.
+    Mantle serves open-weight models such as google.gemma-4-* over an OpenAI-compatible
+    API; Strands mints its bearer token from boto3's usual credential chain (env keys,
+    AWS_PROFILE, or the instance role), which needs bedrock-mantle:CreateInference and
+    bedrock-mantle:CallWithBearerToken.
     """
     if model_id:
-        return BedrockModel(model_id=model_id, region_name=region, temperature=0.2)
+        return OpenAIModel(
+            model_id=model_id,
+            bedrock_mantle_config={"region": region} if region else {},
+            # Gemma 4 on Mantle rejects more than one tool call per turn.
+            params={"temperature": 0.2, "parallel_tool_calls": False},
+        )
     return OllamaModel(
         host="http://localhost:11434",
         model_id="gemma4:e2b",

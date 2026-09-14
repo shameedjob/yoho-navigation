@@ -11,7 +11,7 @@
   FIREBASE_CREDENTIALS          service-account JSON path; unset = Application Default Credentials
   FIREBASE_PROJECT_ID           optional
   YOHO_MONTHLY_TOKEN_LIMIT      default per-user monthly tokens, default 200000
-  YOHO_AGENT_MODEL              Amazon Bedrock model or inference-profile id (region: AWS_REGION);
+  YOHO_AGENT_MODEL              Amazon Bedrock Mantle model id, e.g. google.gemma-4-26b-a4b (region: AWS_REGION);
                                 unset = local Ollama gemma4:e2b
   YOHO_DEV                      "1" allows http:// OAuth redirects and non-Secure cookies
   YOHO_WEBHOOK_BASE_URL         public HTTPS origin Google can reach (e.g. an ngrok URL);

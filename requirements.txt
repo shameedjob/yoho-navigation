@@ -1,7 +1,7 @@
 requests>=2.31
 gtfs-realtime-bindings>=1.0.0
 croniter>=2.0
-strands-agents>=1.55
+strands-agents[openai]>=1.55  # [openai]: Bedrock Mantle (openai + aws-bedrock-token-generator)
 torch>=2.14.0
 torch-geometric>=2.8.0
 torch-geometric-temporal>=0.56.2
