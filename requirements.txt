@@ -15,8 +15,6 @@ charset-normalizer==3.5.1
 click==8.5.0
 croniter==6.2.4
 cryptography==50.0.1
-Cython==3.3.0
-decorator==4.4.2
 docstring_parser==0.18.0
 filelock==3.32.6
 firebase_admin==7.5.0
@@ -107,9 +105,6 @@ strands-agents==1.55.1
 sympy==1.14.0
 torch==2.14.0
 torch-geometric==2.8.0.post1
-torch_geometric_temporal==0.56.2
-torch_scatter==2.1.2
-torch_sparse==0.6.18
 tqdm==4.70.1
 truststore==0.10.4
 typing-inspection==0.4.4

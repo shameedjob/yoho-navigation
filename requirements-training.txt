@@ -1,0 +1,11 @@
+# Extra packages for the training scripts that use the DCRNN code in ml_model/model.py
+# (train_gnn, train_rgnn, train_gat, forecaster).
+# Not needed to run the web app, scheduler or snapshot service. torch-sparse and
+# torch-scatter build from source against the installed torch, so install torch first
+# and use: pip install --no-build-isolation -r requirements-training.txt
+-r requirements.txt
+Cython==3.3.0
+decorator==4.4.2
+torch_scatter==2.1.2
+torch_sparse==0.6.18
+torch_geometric_temporal==0.56.2
