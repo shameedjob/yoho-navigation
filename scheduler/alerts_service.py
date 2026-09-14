@@ -58,7 +58,8 @@ def main() -> None:
 
     def due_checks() -> None:
         for r in run_due_checks(store, cipher, notifier, int(time.time()),
-                                geocode=transit_geocode, route=schedule_router):
+                                geocode=transit_geocode, route=schedule_router,
+                                link_base=settings.public_base_url):
             log.info("due check %s: %s%s", r["id"], r["status"], f" ({r['error']})" if r.get("error") else "")
 
     def watches() -> None:

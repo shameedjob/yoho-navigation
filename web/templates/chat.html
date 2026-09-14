@@ -186,7 +186,7 @@ function setMarkdown(el,text){
 addBubble("Hello. How can I help you plan your travel?",false);
 
 const ERRORS={
-  token_limit_reached:"You've used this month's Yoho allowance. It resets at the start of next month.",
+  token_limit_reached:"You've used this week's Yoho allowance. It resets on Monday (UTC).",
   request_in_progress:"Still working on your last message — one moment.",
   message_too_long:"That message is too long — try a shorter one.",
 };
@@ -245,6 +245,28 @@ async function deliver(val){
   }
 }
 document.getElementById('dock').addEventListener('submit',send);
+
+// /trip/<id>, the link in an alert email: show the trip that was emailed, on the map and in the thread.
+const TRIP_ID={{ (trip_id or none)|tojson }};
+async function showEmailedTrip(id){
+  const note=addBubble('',false); note.bubble.classList.add('pending');
+  const stopStatus=startStatus(note.p);
+  try{
+    const trip=await yohoApi(`/api/trips/${encodeURIComponent(id)}`);
+    stopStatus();
+    setMarkdown(note.p,`**${trip.subject}**\n_Emailed ${trip.sent_at}_\n\n${trip.body}`);
+    try{ if(trip.route) routeMap.show(trip.route); }catch(mapErr){ console.error('drawing on the map failed',mapErr); }
+  }catch(err){
+    stopStatus();
+    note.p.textContent=err.message==='trip_not_found'
+      ?"That trip is no longer available. Ask me to plan it again."
+      :"Couldn't load that trip. Try again.";
+  }finally{
+    note.bubble.classList.remove('pending');
+    thread.scrollTop=thread.scrollHeight;
+  }
+}
+if(TRIP_ID) showEmailedTrip(TRIP_ID);
 // Ask for location on load so "how do I get to X?" can start from where the user is.
 yohoTrackLocation();
 </script>

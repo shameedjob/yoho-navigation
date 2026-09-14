@@ -79,6 +79,7 @@ def google_callback():
         return redirect(url_for("pages.login", error="unverified_email"))
 
     uid = ident.sub
+    next_path = session.get("next")
     fields: dict = {"email": ident.email, "name": ident.name, "picture": ident.picture}
     if grant.refresh_token:
         fields["google"] = {
@@ -99,7 +100,13 @@ def google_callback():
     except Exception:
         log.exception("initial calendar sync failed for a user")  # don't block sign-in on it
     _start_alerts(svc, uid)
-    return redirect(url_for("pages.chat"))
+    return redirect(next_path if _local_path(next_path) else url_for("pages.chat"))
+
+
+def _local_path(path) -> bool:
+    """A same-site path to return to after login ("/trip/abc"), not an open
+    redirect ("//evil.example", "https://...")."""
+    return isinstance(path, str) and path.startswith("/") and not path.startswith("//") and "\\" not in path
 
 
 def _start_alerts(svc, uid: str) -> None:

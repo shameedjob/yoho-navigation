@@ -43,7 +43,7 @@ def me(uid: str):
         picture=user.get("picture"),
         home_set=has_home(user),
         calendar={"connected": calendar_connected(user), "synced_at": user.get("calendar_synced_at")},
-        usage=quota_status(svc.store, uid, svc.settings.monthly_token_limit, user).as_dict(),
+        usage=quota_status(svc.store, uid, svc.settings.weekly_token_limit, user).as_dict(),
     )
 
 
@@ -116,6 +116,20 @@ def _client_location(value) -> tuple[float, float] | None:
     return (lat, lon) if in_service_area(lat, lon) else None
 
 
+@bp.get("/trips/<trip_id>")
+@login_required_api
+def emailed_trip(uid: str, trip_id: str):
+    """A trip from an alert email, for /trip/<trip_id>: {"subject", "body" (the
+    email text), "sent_at" (local time), "route" (as /api/chat sends it)}. 404 when
+    it isn't this user's or is gone."""
+    from accounts.alerts import emailed_trip as load_trip
+    svc = services()
+    trip = load_trip(svc.store, svc.cipher, uid, trip_id)
+    if trip is None:
+        return _error("trip_not_found", 404)
+    return jsonify(subject=trip["subject"], body=trip["body"], sent_at=trip["sent_at"], route=trip["route"])
+
+
 @bp.post("/chat")
 @login_required_api
 def chat(uid: str):
@@ -130,7 +144,7 @@ def chat(uid: str):
     if len(message) > MAX_MESSAGE_CHARS:
         return _error("message_too_long", 413, max_chars=MAX_MESSAGE_CHARS)
 
-    status = quota_status(svc.store, uid, svc.settings.monthly_token_limit)
+    status = quota_status(svc.store, uid, svc.settings.weekly_token_limit)
     if status.exceeded:
         return _error("token_limit_reached", 429, usage=status.as_dict())
 
@@ -162,7 +176,7 @@ def chat(uid: str):
     if route and "map" not in reply.lower():
         reply = f"{reply} I've highlighted the route on your map.".strip()
     return jsonify(reply=reply, route=route, places=places, stations=stations_payload(agent),
-                   usage=quota_status(svc.store, uid, svc.settings.monthly_token_limit).as_dict())
+                   usage=quota_status(svc.store, uid, svc.settings.weekly_token_limit).as_dict())
 
 
 @bp.delete("/chat")

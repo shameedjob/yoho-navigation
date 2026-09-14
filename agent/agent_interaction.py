@@ -23,15 +23,18 @@ from strands import Agent, tool
 from strands.models.ollama import OllamaModel
 from strands.models.openai import OpenAIModel
 from accounts.home import load_home
+from agent.directions import HOME, endpoint as _endpoint, route_payload as _route_payload
 from accounts.trips import (LOCAL_TIME_FORMATS, local_label, no_home as _no_home, parse_event_time as _parse_start,
                             parse_local_time, plan_leave_by, transit_geocode, transit_router)
 from storage import FieldCipher, UserStore
 
 SYSTEM_PROMPT = """You are Yoho, a concise assistant for getting around New York City on public transit.
-Route tools return a summary (minutes, lines, transfers). The route is drawn on the user's map
+Route tools return a summary (minutes, lines, transfers, departure and arrival times). The route is drawn on the user's map
 automatically: when a result has "highlighted_on_map": true, tell the user you've highlighted the
 route on their map. Don't list stations or stops yourself; if they ask which stations or where to
 transfer, call route_stations.
+Whenever you give a trip, say when it departs and when it arrives (the tool's local times: departs/arrives,
+or leave_by/arrive_by), not only how many minutes it takes.
 Answer briefly unless the user asks for detail. Use tools to geocode and plan; don't invent information.
 For trips starting or ending at the user's home, use route_from_home / route_to_home. The home
 location is private: you can't see it, don't ask the user for it, and don't guess it.
@@ -77,7 +80,7 @@ def make_user_tools(uid: str, store: UserStore, cipher: FieldCipher, log: RouteL
             avoid_lines: lines or bus routes to leave out, e.g. ["L"], ["4", "5"], ["B38"].
 
         Returns:
-            The route summary, as get_path returns it, or {"error": "no_location"} when the
+            The route summary with "departs"/"arrives" local times, as get_path returns it, or {"error": "no_location"} when the
             user's location isn't available. The location itself is not included.
         """
         if location is None:
@@ -89,9 +92,10 @@ def make_user_tools(uid: str, store: UserStore, cipher: FieldCipher, log: RouteL
         avoid = _avoid(avoid_modes, avoid_lines)
         if isinstance(avoid, dict):
             return avoid
-        return _routed(lambda: _summarized(log, get_path(start=location, end=tuple(destination),
-                                                         departure_time=departure, avoid=avoid),
-                                           start=location, end=tuple(destination)), avoid)
+        leave = departure or int(time.time())
+        return _timed(_routed(lambda: _summarized(log, get_path(start=location, end=tuple(destination),
+                                                                departure_time=leave, avoid=avoid),
+                                                  start=location, end=tuple(destination)), avoid), leave)
 
     @tool
     def route_from_home(destination: tuple[float, float], depart_at: str | None = None, avoid_modes: list[str] | None = None, avoid_lines: list[str] | None = None) -> dict:
@@ -104,7 +108,7 @@ def make_user_tools(uid: str, store: UserStore, cipher: FieldCipher, log: RouteL
             avoid_lines: lines or bus routes to leave out, e.g. ["L"], ["4", "5"], ["B38"].
 
         Returns:
-            The route summary, as get_path returns it. The home location itself is not included.
+            The route summary with "departs"/"arrives" local times, as get_path returns it. The home location itself is not included.
         """
         departure = _departure(depart_at)
         if isinstance(departure, dict):
@@ -116,9 +120,10 @@ def make_user_tools(uid: str, store: UserStore, cipher: FieldCipher, log: RouteL
         avoid = _avoid(avoid_modes, avoid_lines)
         if isinstance(avoid, dict):
             return avoid
-        return _routed(lambda: _summarized(log, get_path(start=(home.lat, home.lon), end=tuple(destination),
-                                                         departure_time=departure, avoid=avoid),
-                                           start=HOME, end=tuple(destination)), avoid)
+        leave = departure or int(time.time())
+        return _timed(_routed(lambda: _summarized(log, get_path(start=(home.lat, home.lon), end=tuple(destination),
+                                                                departure_time=leave, avoid=avoid),
+                                                  start=HOME, end=tuple(destination)), avoid), leave)
 
     @tool
     def route_to_home(start: tuple[float, float] | None = None, depart_at: str | None = None, avoid_modes: list[str] | None = None, avoid_lines: list[str] | None = None) -> dict:
@@ -132,7 +137,7 @@ def make_user_tools(uid: str, store: UserStore, cipher: FieldCipher, log: RouteL
             avoid_lines: lines or bus routes to leave out, e.g. ["L"], ["4", "5"], ["B38"].
 
         Returns:
-            The route summary, as get_path returns it. The home location itself is not included.
+            The route summary with "departs"/"arrives" local times, as get_path returns it. The home location itself is not included.
         """
         departure = _departure(depart_at)
         if isinstance(departure, dict):
@@ -148,9 +153,10 @@ def make_user_tools(uid: str, store: UserStore, cipher: FieldCipher, log: RouteL
         avoid = _avoid(avoid_modes, avoid_lines)
         if isinstance(avoid, dict):
             return avoid
-        return _routed(lambda: _summarized(log, get_path(start=tuple(start), end=(home.lat, home.lon),
-                                                         departure_time=departure, avoid=avoid),
-                                           start=tuple(start), end=HOME), avoid)
+        leave = departure or int(time.time())
+        return _timed(_routed(lambda: _summarized(log, get_path(start=tuple(start), end=(home.lat, home.lon),
+                                                                departure_time=leave, avoid=avoid),
+                                                  start=tuple(start), end=HOME), avoid), leave)
 
     @tool
     def upcoming_events(hours_ahead: int = 24) -> list[dict]:
@@ -191,7 +197,8 @@ def make_user_tools(uid: str, store: UserStore, cipher: FieldCipher, log: RouteL
               "minutes", "lines", "transfers": the live-adjusted route's summary,
               "total_time_sec": door-to-door travel time,
               "delay_vs_schedule_sec": how much slower than schedule,
-              "leave_by_ts": when to leave to make the event on time,
+              "leave_by": local time to leave to make the event on time,
+              "arrive_by": the event's start, local time,
               "alerts": service alerts on the route,
             }
         """
@@ -238,7 +245,8 @@ def make_user_tools(uid: str, store: UserStore, cipher: FieldCipher, log: RouteL
             **_record(log, predicted, start=HOME, end=dest_pos),
             "total_time_sec": predicted["total_time_sec"],
             "delay_vs_schedule_sec": live_result["delay_sec"],
-            "leave_by_ts": live_result["leave_by_ts"],
+            "leave_by": local_label(live_result["leave_by_ts"]),
+            "arrive_by": local_label(event_time),
             "slack_sec": live_result["slack_sec"],
             "alerts": live_result["alerts_on_route"],
             "on_time": live_result["slack_sec"] > 0,
@@ -263,7 +271,7 @@ def make_user_tools(uid: str, store: UserStore, cipher: FieldCipher, log: RouteL
 
         Returns:
             {"leave_by" (local time to tell the user), "arrive_by", "slack_min" (negative =
-             already late), "minutes", "lines", "transfers",
+             already late), "arrives_if_leaving_now" (only when already late), "minutes", "lines", "transfers",
              "start_source": "given", "current_location", "event" or "home", "event_summary"/"event_location" when from
              an event, "live": whether live MTA predictions were used, "alerts"}.
         """
@@ -286,6 +294,8 @@ def make_user_tools(uid: str, store: UserStore, cipher: FieldCipher, log: RouteL
             plan["start_source"] = "current_location"
         if avoid and "error" not in plan:
             plan["avoided"] = avoid.describe()
+        if "error" not in plan and plan["slack_min"] < 0:
+            plan["arrives_if_leaving_now"] = local_label(round(now + plan["total_time_sec"]))
         plan.pop("leave_by_ts", None)
         start_point = plan.pop("start_point", None)  # never to the model; home isn't sent to the browser either
         start_end = HOME if plan.get("start_source") == "home" else start_point
@@ -401,6 +411,14 @@ def _routed(plan, avoid) -> dict:
     return {**result, "avoided": avoid.describe()} if avoid and "error" not in result else result
 
 
+def _timed(result: dict, leave: int) -> dict:
+    """A route result with the local times it departs and arrives, leaving at
+    `leave`; errors (and results without a total time) unchanged."""
+    if "error" in result or result.get("total_time_sec") is None:
+        return result
+    return {**result, "departs": local_label(leave), "arrives": local_label(round(leave + result["total_time_sec"]))}
+
+
 def _route_summary(route: dict) -> dict:
     from agent.directions import route_summary
     return route_summary(route["steps"], route["total_time_sec"])
@@ -437,16 +455,9 @@ class RouteLog:
                start: Endpoint = None, end: Endpoint = None) -> dict:
         """`start` / `end`: the trip's (lat, lon), HOME for the user's home (sent to
         the browser without coordinates, like everywhere else), or None if unknown."""
-        from agent.directions import format_directions, route_legs, route_summary
-        summary = route_summary(steps, total_time_sec)
-        coords = lambda e: e if isinstance(e, tuple) else None
-        self.route = {**summary, "total_time_sec": total_time_sec,
-                      "walk_in_sec": walk_in_sec, "walk_out_sec": walk_out_sec,
-                      "start": _endpoint(start), "end": _endpoint(end),
-                      "legs": route_legs(steps, walk_in_sec, walk_out_sec, coords(start), coords(end)),
-                      "directions": format_directions(steps, total_time_sec, walk_in_sec, walk_out_sec)}
+        self.route = _route_payload(steps, total_time_sec, walk_in_sec, walk_out_sec, start, end)
         # The chat page draws the last recorded route (web/static/route_map.js).
-        return {**summary, "highlighted_on_map": True}
+        return {k: self.route[k] for k in ("minutes", "lines", "transfers")} | {"highlighted_on_map": True}
 
     def record_trip(self, segments: list[tuple[dict, Endpoint, Endpoint]], stop_names: list[str]) -> None:
         """A multi-stop trip as one drawable route: each segment is (get_path result,
@@ -473,19 +484,7 @@ class RouteLog:
                       "waypoints": waypoints, "legs": legs, "directions": "\n\n".join(directions)}
 
 
-HOME = "home"
 Endpoint = "tuple[float, float] | str | None"
-
-
-def _endpoint(value) -> dict | None:
-    """A trip end for the browser: {"kind": "place", "lat", "lon"}, {"kind": "home"}
-    (no coordinates: home never leaves the server), or None when unknown."""
-    if value == HOME:
-        return {"kind": "home"}
-    if value is None:
-        return None
-    lat, lon = value
-    return {"kind": "place", "lat": float(lat), "lon": float(lon)}
 
 
 def _record(log: RouteLog | None, route: dict, start: Endpoint = None, end: Endpoint = None) -> dict:
@@ -535,11 +534,9 @@ def make_route_tools(log: RouteLog) -> list:
         if isinstance(avoid, dict):
             return avoid
         leave = departure or int(time.time())
-        res = _routed(lambda: _summarized(log, tools.get_path(start=start, end=end, departure_time=leave, avoid=avoid),
-                                          start=start, end=end), avoid)
-        if "error" in res:
-            return res
-        return {**res, "departs": local_label(leave), "arrives": local_label(round(leave + res["total_time_sec"]))}
+        return _timed(_routed(lambda: _summarized(log, tools.get_path(start=start, end=end, departure_time=leave,
+                                                                      avoid=avoid),
+                                                  start=start, end=end), avoid), leave)
 
     @tool
     def get_predicted_path(base_time: int, event_time: str, start_location: tuple[float, float],
@@ -555,7 +552,7 @@ def make_route_tools(log: RouteLog) -> list:
             avoid_lines: lines or bus routes to leave out, e.g. ["L"], ["4", "5"], ["B38"].
 
         Returns:
-            {"delay_sec", "leave_by" (local time), "slack_sec", "route_changed", "predicted": {"minutes",
+            {"delay_sec", "leave_by", "arrive_by" (local times), "slack_sec", "route_changed", "predicted": {"minutes",
              "lines", "transfers", "total_time_sec"}, "alerts_on_route", "model_adjusted", "waits_adjusted"}
         """
         deadline = _departure(event_time)
@@ -572,7 +569,8 @@ def make_route_tools(log: RouteLog) -> list:
         planned = {k: v for k, v in res["planned"].items() if k != "steps"}
         return {**res, "planned": planned,
                 "predicted": _summarized(log, res["predicted"], start=start_location, end=end_location),
-                "leave_by": local_label(res["leave_by_ts"]), **({"avoided": avoid.describe()} if avoid else {})}
+                "leave_by": local_label(res["leave_by_ts"]), "arrive_by": local_label(deadline),
+                **({"avoided": avoid.describe()} if avoid else {})}
 
     @tool
     def compare_schedule_vs_live(start: tuple[float, float], end: tuple[float, float],
@@ -587,8 +585,9 @@ def make_route_tools(log: RouteLog) -> list:
             avoid_lines: lines or bus routes to leave out, e.g. ["L"], ["4", "5"], ["B38"].
 
         Returns:
-            {"schedule_route", "live_route": summaries ({"minutes", "lines", "transfers"}),
-             "delay_sec", "route_changed", "leave_by" (local time), "slack_sec", "alerts"}
+            {"departs" (local time; both routes leave now), "schedule_route", "live_route": summaries
+             ({"minutes", "lines", "transfers", "arrives"}), "delay_sec", "route_changed", "leave_by" (local time),
+             "slack_sec", "alerts"}
         """
         deadline = _departure(arrival_deadline)
         if isinstance(deadline, dict):
@@ -601,9 +600,14 @@ def make_route_tools(log: RouteLog) -> list:
         except ValueError as exc:
             return {"error": "no_route", "message": str(exc)}
         from agent.directions import route_summary
-        return {**res, "schedule_route": route_summary(res["schedule_route"], res["schedule_time_sec"]),
-                "live_route": log.record(res["live_route"], res["live_time_sec"],
-                                         start=_coords_or_home(start), end=_coords_or_home(end)),
+        now = int(time.time())
+        arrives = lambda sec: local_label(round(now + sec))
+        return {**res, "departs": local_label(now),
+                "schedule_route": {**route_summary(res["schedule_route"], res["schedule_time_sec"]),
+                                   "arrives": arrives(res["schedule_time_sec"])},
+                "live_route": {**log.record(res["live_route"], res["live_time_sec"],
+                                            start=_coords_or_home(start), end=_coords_or_home(end)),
+                               "arrives": arrives(res["live_time_sec"])},
                 "leave_by": local_label(res["leave_by_ts"])}
 
     @tool
@@ -745,11 +749,42 @@ def token_usage(agent: Any) -> tuple[int, int]:
     return int(usage.get("inputTokens", 0)), int(usage.get("outputTokens", 0))
 
 
+TOOL_BLOCKS = ("toolUse", "toolResult")
+
+
+def _is_prompt(message: dict) -> bool:
+    """A user message the user typed, as opposed to one carrying tool results."""
+    return message.get("role") == "user" and not any("toolResult" in block for block in message.get("content", []))
+
+
+def _without_tool_calls(messages: list[dict]) -> list[dict]:
+    """Drop toolUse/toolResult blocks, then messages left empty, merging the
+    same-role neighbours that leaves behind (e.g. "Let me check." + the answer)
+    since some providers reject two assistant messages in a row."""
+    out: list[dict] = []
+    for message in messages:
+        content = [block for block in message.get("content", []) if not any(k in block for k in TOOL_BLOCKS)]
+        if not content:
+            continue
+        if out and out[-1]["role"] == message.get("role"):
+            out[-1] = {**out[-1], "content": [*out[-1]["content"], *content]}
+        else:
+            out.append({**message, "content": content})
+    return out
+
+
 def trim_history(messages: list[dict], limit: int = MAX_STORED_MESSAGES) -> list[dict]:
-    """Keep the last `limit` messages, starting at a plain user message so the
-    kept history never opens on a dangling tool result."""
-    kept = list(messages[-limit:])
-    while kept and not (kept[0].get("role") == "user"
-                        and not any("toolResult" in block for block in kept[0].get("content", []))):
+    """The history to store: tool calls only from the latest request (they're
+    most of the context, and older ones are rarely needed), then the last
+    `limit` messages, starting at a plain user message so the kept history never
+    opens on a dangling tool result. The latest request is kept whole even if
+    it alone runs past `limit`."""
+    last = next((i for i in range(len(messages) - 1, -1, -1) if _is_prompt(messages[i])), 0)
+    earlier = _without_tool_calls(messages[:last])
+    if earlier and messages[last:] and earlier[-1]["role"] == messages[last].get("role"):
+        earlier.pop()  # an earlier turn that ended without a reply; don't open two user turns in a row
+    history = [*earlier, *messages[last:]]
+    kept = history[max(0, min(len(history) - limit, len(earlier))):]
+    while kept and not _is_prompt(kept[0]):
         kept.pop(0)
     return kept

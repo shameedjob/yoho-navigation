@@ -11,7 +11,9 @@ the trip, unknown when the calendar syncs. So each check runs in two phases:
   plan   PLAN_AHEAD_SEC before the event: route the trip to learn the leave
          time, then move the check to (leave time - lead). If that moment has
          already passed (a late-added event, a very long trip), send right away.
-  send   at (leave time - lead): route again with fresh data and email it.
+  send   at (leave time - lead): route again with fresh data, check the route's
+         stations for live alerts and delays, and email it with a link to
+         /trip/<trip_id>, where the signed-in rider sees the same trip on the map.
 
 Checks live in the store, not in a process, so any number of web workers can
 write them, one scheduler reads them, and a restart loses nothing.
@@ -31,7 +33,7 @@ import uuid
 
 from accounts.calendar_sync import user_credentials
 from accounts.trips import Geocoder, Router, event_location, local_label, parse_event_time, plan_leave_by, resolve_start
-from agent.directions import format_directions
+from agent.directions import HOME, _line_label, format_directions, route_payload
 from integrations.google import CalendarAccessRevoked
 from integrations.google.calendar import start_watch, stop_watch
 from storage import FieldCipher, UserStore
@@ -80,14 +82,39 @@ def _clock(ts: int) -> str:
     return local_label(ts).split(", ")[-1]
 
 
-def compose_alert(plan: dict, summary: str | None, location: str | None, now: int) -> tuple[str, str]:
-    """(subject, body) for one alert email:
+def _status_lines(problems: list[dict] | None) -> list[str]:
+    """The email's live-status section: route_problems' findings, "all clear",
+    or that live data couldn't be checked (None)."""
+    if problems is None:
+        return ["Live delays and service alerts couldn't be checked, so this route is based on the schedule."]
+    if not problems:
+        return ["No delays or service alerts are reported on your route right now."]
+    lines = ["Delays and service alerts on your route:"]
+    for p in problems:
+        notes = [f"{_line_label(d['mode'], d['route'])} is running about {d['delay_min']} min late"
+                 for d in p["delays"]]
+        notes += p["alerts"] or ([f"service alert ({', '.join(p['alert_types'])})"] if p["alert_types"]
+                                 else ["service alert"] if not p["delays"] else [])
+        lines.append(f"- {p['name']}: " + "; ".join(notes))
+    if any(p["delays"] for p in problems):
+        lines.append("Allow extra time: the ETA above doesn't include these delays.")
+    return lines
 
-        Subject: YoHo Alert: Dentist
+
+def compose_alert(plan: dict, summary: str | None, location: str | None, now: int,
+                  problems: list[dict] | None = None) -> tuple[str, str]:
+    """(subject, body) for one alert email. `problems` is route_problems' result
+    for the route, or None when live status couldn't be checked:
+
+        Subject: YoHo Alert: Dentist (delays on your route)
         Your trip to Barclays Center is on schedule. To make sure you get there on
         time, be sure to follow this route from home at 8:14 AM:
         <directions>
         ETA: 9:00 AM
+
+        Delays and service alerts on your route:
+        - Atlantic Av-Barclays Ctr: the 2 train is running about 6 min late
+        Allow extra time: the ETA above doesn't include these delays.
     """
     what = summary or "your event"
     where = location or what
@@ -104,12 +131,23 @@ def compose_alert(plan: dict, summary: str | None, location: str | None, now: in
         intro = (f"Your trip to {where} is running behind: you'd have needed to leave at "
                  f"{_clock(plan['leave_by_ts'])}. Leave now and follow this route from {start}:")
         eta = now + round(plan["total_time_sec"])
-    lines = [intro, "", directions, "", f"ETA: {_clock(eta)}"]
-    if plan.get("alerts"):
-        lines += ["", "Service alerts on your route: " + ", ".join(a["stop_name"] for a in plan["alerts"])]
+    lines = [intro, "", directions, "", f"ETA: {_clock(eta)}", "", *_status_lines(problems)]
     if plan.get("start_note"):
         lines += ["", f"Note: {plan['start_note']}."]
-    return f"YoHo Alert: {what}", "\n".join(lines)
+    flag = (" (delays on your route)" if any(p["delays"] for p in problems or [])
+            else " (service alert on your route)" if problems else "")
+    return f"YoHo Alert: {what}{flag}", "\n".join(lines)
+
+
+def _live_problems(steps: list[dict]) -> list[dict] | None:
+    """route_problems for the email, or None when the snapshot service is down:
+    the alert still goes out, saying live status wasn't checked."""
+    from agent.station_status import route_problems
+    try:
+        return route_problems(steps)
+    except Exception as exc:
+        log.warning("live route status unavailable: %s", exc)
+        return None
 
 
 def _plan_from_departure(store, cipher, uid, destination, arrive: int, now: int, *, geocode, route) -> dict:
@@ -130,9 +168,29 @@ def _plan_from_departure(store, cipher, uid, destination, arrive: int, now: int,
     return min(first, second, key=lambda p: p["leave_by_ts"])
 
 
+def trip_field(trip_id: str) -> str:
+    """The cipher field an emailed trip (due check trip_enc) is bound to."""
+    return f"trip:{trip_id}"
+
+
+def emailed_trip(store: UserStore, cipher: FieldCipher, uid: str, trip_id: str) -> dict | None:
+    """The trip emailed to `uid` under `trip_id` -- {"subject", "body", "sent_at",
+    "route"} -- or None. Only the user's own checks are searched, so a link
+    forwarded to someone else shows them nothing. It lasts as long as the
+    check: until a calendar sync after the event starts, or the event moves."""
+    for check in store.list_due_checks(uid):
+        if check.get("trip_id") == trip_id and check.get("trip_enc"):
+            return cipher.decrypt_json(check["trip_enc"], user_id=uid, field=trip_field(trip_id))
+    return None
+
+
 def run_due_checks(store: UserStore, cipher: FieldCipher, notifier, now: int,
-                   *, geocode: Geocoder, route: Router) -> list[dict]:
+                   *, geocode: Geocoder, route: Router, route_status=None,
+                   link_base: str | None = None) -> list[dict]:
     """Run every pending check that's due, in its phase (see the module doc).
+    `route_status(steps)` gives the live problems on a route to send, or None when
+    unknown; defaults to the snapshot service's alerts and delays. `link_base` is
+    the web app's public origin for the email's trip link; None leaves it out.
     Returns one {"id", "status", ...} per check handled: "planned" (moved to its
     send time, with "send_at"), "sent", "expired" or a failure. A failure stays
     pending and is retried next run, up to MAX_ATTEMPTS; a check whose event has
@@ -161,8 +219,15 @@ def run_due_checks(store: UserStore, cipher: FieldCipher, notifier, now: int,
                                              "planned_leave_by": plan["leave_by"]})
                 results.append({"id": cid, "status": "planned", "send_at": send_at, "leave_by": plan["leave_by"]})
                 continue
-            subject, body = compose_alert(plan, event.get("summary"), address, now)
-            message_id = notifier.send(uid, subject, body)
+            problems = (route_status or _live_problems)(plan["steps"])
+            subject, body = compose_alert(plan, event.get("summary"), address, now, problems)
+            trip_id = secrets.token_urlsafe(16)
+            start_end = HOME if plan.get("start_source") == "home" else plan.get("start_point")
+            trip = {"subject": subject, "body": body, "sent_at": local_label(now),
+                    "route": route_payload(plan["steps"], plan["total_time_sec"], plan.get("walk_in_sec"),
+                                           plan.get("walk_out_sec"), start_end, tuple(destination))}
+            email = f"{body}\n\nSee this trip on your map: {link_base.rstrip('/')}/trip/{trip_id}" if link_base else body
+            message_id = notifier.send(uid, subject, email)
         except Exception as exc:
             attempts = check.get("attempts", 0) + 1
             status = "failed" if attempts >= MAX_ATTEMPTS else "pending"
@@ -170,9 +235,11 @@ def run_due_checks(store: UserStore, cipher: FieldCipher, notifier, now: int,
             store.update_due_check(cid, {"attempts": attempts, "last_error": str(exc)[:500], "status": status})
             results.append({"id": cid, "status": status, "error": str(exc)})
             continue
+        # Encrypted: the route holds the event's (and a start event's) coordinates.
         store.update_due_check(cid, {"status": "sent", "sent_at": now, "message_id": message_id,
-                                     "leave_by": plan["leave_by"]})
-        results.append({"id": cid, "status": "sent", "subject": subject, "body": body})
+                                     "leave_by": plan["leave_by"], "trip_id": trip_id,
+                                     "trip_enc": cipher.encrypt_json(trip, user_id=uid, field=trip_field(trip_id))})
+        results.append({"id": cid, "status": "sent", "subject": subject, "body": email, "trip_id": trip_id})
     return results
 
 
@@ -251,6 +318,6 @@ def ensure_email_subscription(store: UserStore, notifier, uid: str) -> str | Non
     return arn
 
 
-__all__ = ["ALERT_LEAD_SEC", "WEBHOOK_PATH", "compose_alert", "due_check_id", "ensure_email_subscription",
+__all__ = ["ALERT_LEAD_SEC", "WEBHOOK_PATH", "compose_alert", "due_check_id", "emailed_trip", "ensure_email_subscription",
            "ensure_watch", "local_label", "refresh_due_checks", "renew_watches", "run_due_checks",
            "start_watch_for_user", "stop_channel", "verify_channel"]

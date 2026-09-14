@@ -7,12 +7,13 @@ Firestore layout (storage/firestore_store.py), keyed by Google `sub`:
                                    google {refresh_token_enc, scopes, revoked},
                                    home_enc, token_limit (optional override),
                                    calendar_synced_at
-  users/{uid}/usage/{YYYY-MM}      input_tokens, output_tokens, total_tokens, requests
+  users/{uid}/usage/{YYYY-Www}     input_tokens, output_tokens, total_tokens, requests
   users/{uid}/calendar_events/{id} summary, start, end, location_enc, updated
   users/{uid}/private/conversation messages (JSON string, recent turns only)
   watch_channels/{channel_id}      uid, resource_id, token_hash, expiration (ms), address
   due_checks/{uid}__{event_id}     uid, event_id, event_start, check_at (Unix s),
-                                   status (pending|sent|expired), sent_at, last_error
+                                   status (pending|sent|expired), sent_at, last_error,
+                                   trip_id, trip_enc (the emailed trip, for /trip/<trip_id>)
 
 watch_channels and due_checks are top-level: the webhook knows only the channel
 id, and the scheduler asks "what's due" across all users.
@@ -33,8 +34,9 @@ from typing import Any, Protocol
 
 
 def usage_period(now: datetime | None = None) -> str:
-    """Billing period key: the UTC calendar month, e.g. "2026-09"."""
-    return (now or datetime.now(timezone.utc)).strftime("%Y-%m")
+    """Billing period key: the UTC ISO week (Monday to Sunday), e.g. "2026-W38"."""
+    year, week, _ = (now or datetime.now(timezone.utc)).isocalendar()
+    return f"{year}-W{week:02d}"
 
 
 class UserStore(Protocol):

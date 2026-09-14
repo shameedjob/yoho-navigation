@@ -66,7 +66,7 @@ def env(monkeypatch):
     agent_opts: dict = {}
     settings = Settings(secret_key="test", google_client_id="cid", google_client_secret="secret",
                         google_redirect_uri="http://localhost/cb", data_keys=generate_key_entry("k1"),
-                        store="memory", monthly_token_limit=1000, dev=True)
+                        store="memory", weekly_token_limit=1000, dev=True)
     calendar_items = [
         {"id": "ev1", "status": "confirmed", "summary": "Dentist", "location": "10 Union Sq E, New York",
          "start": {"dateTime": "2026-09-14T10:00:00-04:00"}, "end": {"dateTime": "2026-09-14T11:00:00-04:00"}},
@@ -220,6 +220,19 @@ def test_home_tool_routes_without_returning_home(env, monkeypatch):
     assert calls == [((40.75, -73.99), (40.70, -74.01))]
 
 
+def test_route_tools_report_departure_and_arrival_times(env, monkeypatch):
+    from agent.agent_interaction import RouteLog, make_user_tools
+    login(env)
+    env.client.put("/api/me/home", json={"lat": 40.75, "lon": -73.99}, headers=WRITE)
+    step = lambda stop, lat: {"stop_id": stop, "stop_name": stop, "mode": "subway", "route": "6", "lat": lat, "lon": -73.99}
+    route = {"steps": [step("A", 40.74), step("B", 40.73)], "total_time_sec": 1500, "walk_in_sec": 60, "walk_out_sec": 60}
+    monkeypatch.setitem(__import__("sys").modules, "agent.tools",
+                        SimpleNamespace(get_path=lambda start, end, departure_time=None, avoid=None: route))
+    tool = {t.tool_name: t for t in make_user_tools(UID, env.store, env.cipher, RouteLog())}["route_from_home"]
+    result = tool(destination=(40.70, -74.01), depart_at="2026-09-14 09:00")
+    assert (result["minutes"], result["departs"], result["arrives"]) == (25, "Mon Sep 14, 9:00 AM", "Mon Sep 14, 9:25 AM")
+
+
 def test_current_location_tools_route_from_here_and_say_when_unknown(env, monkeypatch):
     from agent.agent_interaction import make_user_tools
     login(env)
@@ -327,7 +340,42 @@ def test_trim_history_starts_on_user_text():
             {"role": "user", "content": [{"toolResult": {}}]},
             {"role": "assistant", "content": [{"text": "b"}]},
             {"role": "user", "content": [{"text": "c"}]}]
-    assert trim_history(msgs, limit=3) == msgs[4:]
+    assert trim_history(msgs, limit=1) == msgs[4:]
+
+
+def test_trim_history_keeps_tool_calls_only_from_last_request():
+    from agent.agent_interaction import trim_history
+    use, result = {"toolUse": {"name": "get_path"}}, {"toolResult": {"content": []}}
+    msgs = [{"role": "user", "content": [{"text": "a"}]},
+            {"role": "assistant", "content": [{"text": "Let me check."}, use]},
+            {"role": "user", "content": [result]},
+            {"role": "assistant", "content": [{"text": "b"}]},
+            {"role": "user", "content": [{"text": "c"}]},
+            {"role": "assistant", "content": [use]},
+            {"role": "user", "content": [result]},
+            {"role": "assistant", "content": [{"text": "d"}]}]
+    assert trim_history(msgs) == [
+        {"role": "user", "content": [{"text": "a"}]},
+        {"role": "assistant", "content": [{"text": "Let me check."}, {"text": "b"}]},
+        *msgs[4:],
+    ]
+
+
+def test_trim_history_keeps_last_request_whole_past_limit():
+    from agent.agent_interaction import trim_history
+    msgs = [{"role": "user", "content": [{"text": "a"}]}, {"role": "assistant", "content": [{"text": "b"}]},
+            {"role": "user", "content": [{"text": "c"}]}]
+    for _ in range(3):
+        msgs += [{"role": "assistant", "content": [{"toolUse": {}}]}, {"role": "user", "content": [{"toolResult": {}}]}]
+    msgs.append({"role": "assistant", "content": [{"text": "d"}]})
+    assert trim_history(msgs, limit=4) == msgs[2:]
+
+
+def test_usage_period_is_the_utc_iso_week():
+    from datetime import datetime, timezone
+    assert usage_period(datetime(2026, 9, 14, 0, 0, tzinfo=timezone.utc)) == "2026-W38"  # Monday
+    assert usage_period(datetime(2026, 9, 20, 23, 59, tzinfo=timezone.utc)) == "2026-W38"  # Sunday
+    assert usage_period(datetime(2027, 1, 1, tzinfo=timezone.utc)) == "2026-W53"  # ISO year, not calendar year
 
 
 # --- account deletion -----------------------------------------------------

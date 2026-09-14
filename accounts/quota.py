@@ -1,6 +1,6 @@
-"""Monthly token budget that gates agent usage.
+"""Weekly token budget that gates agent usage.
 
-Each user gets `token_limit` tokens (input + output) per UTC calendar month:
+Each user gets `token_limit` tokens (input + output) per UTC ISO week (Monday to Sunday):
 users/{uid}.token_limit if set, else the app default. The check runs before an
 agent call and the usage is recorded after it, from Strands' own count.
 
@@ -38,7 +38,7 @@ class QuotaStatus:
 
 class QuotaExceeded(Exception):
     def __init__(self, status: QuotaStatus):
-        super().__init__(f"monthly token limit reached ({status.used}/{status.limit})")
+        super().__init__(f"weekly token limit reached ({status.used}/{status.limit})")
         self.status = status
 
 

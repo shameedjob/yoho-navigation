@@ -48,6 +48,19 @@ def test_line_filter_matches_express_variant_and_only_problems_drops_ok():
     assert [r["status"] for r in rows] == ["alert", "delayed"]  # alerts first, then worst delay
 
 
+def test_route_problems_only_counts_delays_on_lines_the_route_rides():
+    step = lambda stop, route: {"stop_id": stop, "stop_name": stop, "mode": "subway", "route": route, "lat": 0, "lon": 0}
+    # the 6 from 14 St-Union Sq to 86 St: the 4 is 7 min late at Union Sq, but the route doesn't ride it
+    problems = SS.route_problems([step("635S", "6"), step("626N", "6")], live=live, alert_headers=headers)
+    assert problems == [{"name": "86 St", "alerts": ["Uptown 4/6 trains are delayed: door problem at 86 St."],
+                         "alert_types": ["delays"], "delays": []}]
+    on_the_4 = SS.route_problems([step("635N", "4"), step("626N", "4")], live=live, alert_headers=headers)
+    assert [(p["name"], p["delays"]) for p in on_the_4] == [
+        ("14 St-Union Sq", [{"mode": "subway", "route": "4", "delay_min": 7}]),
+        ("86 St", [{"mode": "subway", "route": "4", "delay_min": 2}])]
+    assert SS.route_problems([step("L03N", "L"), step("L03N", "L")], live=live, alert_headers=headers) == []
+
+
 def test_find_stations_by_loose_name():
     names = {SS.stations()[i]["name"] for i in SS.find_stations("union square")}
     assert names == {"14 St-Union Sq"}

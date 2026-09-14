@@ -20,6 +20,33 @@ def _rides(steps: list[dict]) -> list[list[dict]]:
     return [run for run in runs if len(run) >= 2]
 
 
+HOME = "home"  # a trip end at the user's home: never sent with coordinates
+
+
+def endpoint(value) -> dict | None:
+    """A trip end for the browser: {"kind": "place", "lat", "lon"}, {"kind": "home"}
+    (no coordinates: home never leaves the server), or None when unknown."""
+    if value == HOME:
+        return {"kind": "home"}
+    if value is None:
+        return None
+    lat, lon = value
+    return {"kind": "place", "lat": float(lat), "lon": float(lon)}
+
+
+def route_payload(steps: list[dict], total_time_sec: float, walk_in_sec: float | None = None,
+                  walk_out_sec: float | None = None, start=None, end=None) -> dict:
+    """The route as the browser draws it (web/static/route_map.js): the summary plus
+    "total_time_sec", "walk_in_sec", "walk_out_sec", "start"/"end" (see endpoint),
+    "legs" and "directions". `start` / `end`: (lat, lon), HOME, or None."""
+    coords = lambda e: tuple(e) if e not in (None, HOME) else None
+    return {**route_summary(steps, total_time_sec), "total_time_sec": total_time_sec,
+            "walk_in_sec": walk_in_sec, "walk_out_sec": walk_out_sec,
+            "start": endpoint(start), "end": endpoint(end),
+            "legs": route_legs(steps, walk_in_sec, walk_out_sec, coords(start), coords(end)),
+            "directions": format_directions(steps, total_time_sec, walk_in_sec, walk_out_sec)}
+
+
 def _line_label(mode: str, route: str) -> str:
     return f"the {route} train" if mode == "subway" else f"the {route} {mode}"
 

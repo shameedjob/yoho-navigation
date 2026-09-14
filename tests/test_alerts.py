@@ -43,7 +43,8 @@ def geocode(address):
 
 
 @pytest.fixture
-def user(env):  # noqa: F811
+def user(env, monkeypatch):  # noqa: F811
+    monkeypatch.setattr("agent.station_status.route_problems", lambda steps: [])  # no snapshot service in tests
     login(env)
     save_home(env.store, env.cipher, UID, Home("home", 40.71, -73.95))
     return env
@@ -252,7 +253,82 @@ def test_alert_is_sent_an_hour_before_leaving_not_before_the_event(user):
     [sent] = run_due_checks(user.store, user.cipher, notifier, planned["send_at"], geocode=geocode, route=fake_route(calls))
     assert sent["status"] == "sent" and len(calls) == 2  # routed again with fresh data at send time
     body = notifier.sent[0]["body"]
-    assert body.startswith("Your trip to 10 Union Sq E, New York is on schedule.") and body.rstrip().endswith("ETA: 12:00 PM")
+    assert body.startswith("Your trip to 10 Union Sq E, New York is on schedule.") and "ETA: 12:00 PM" in body
+
+
+def test_alert_email_reports_delays_and_alerts_along_the_route(user):
+    user.store.replace_calendar_events(UID, [event(user.cipher, "dentist", NOW + 3600)])
+    refresh_due_checks(user.store, UID, NOW - 3600)
+    problems = [{"name": "1 Av", "alerts": ["L trains are running with delays after a signal problem."],
+                 "alert_types": ["delays"], "delays": [{"mode": "subway", "route": "L", "delay_min": 6}]}]
+    notifier, checked = LogNotifier(), []
+    run_due_checks(user.store, user.cipher, notifier, NOW, geocode=geocode, route=fake_route([]),
+                   route_status=lambda steps: checked.append(steps) or problems)
+    [mail] = notifier.sent
+    assert checked == [STEPS] and mail["subject"] == "YoHo Alert: Dentist (delays on your route)"
+    assert ("- 1 Av: the L train is running about 6 min late; "
+            "L trains are running with delays after a signal problem.") in mail["body"]
+    assert "Allow extra time" in mail["body"]
+
+
+def test_alert_email_says_when_the_route_is_clear_or_live_status_is_unknown(user):
+    user.store.replace_calendar_events(UID, [event(user.cipher, "dentist", NOW + 3600),
+                                             event(user.cipher, "gym", NOW + 3600)])
+    refresh_due_checks(user.store, UID, NOW - 3600)
+    notifier, answers = LogNotifier(), iter([[], None])
+    run_due_checks(user.store, user.cipher, notifier, NOW, geocode=geocode, route=fake_route([]),
+                   route_status=lambda steps: next(answers))
+    clear, unknown = notifier.sent
+    assert clear["subject"] in ("YoHo Alert: Dentist", "YoHo Alert: Gym")
+    assert "No delays or service alerts are reported on your route right now." in clear["body"]
+    assert "couldn't be checked" in unknown["body"] and "(delays" not in unknown["subject"]
+
+
+def test_alert_email_links_to_the_trip_on_the_map(user):
+    user.store.replace_calendar_events(UID, [event(user.cipher, "dentist", NOW + 3600)])
+    refresh_due_checks(user.store, UID, NOW - 3600)
+    notifier = LogNotifier()
+    [sent] = run_due_checks(user.store, user.cipher, notifier, NOW, geocode=geocode, route=fake_route([]),
+                            link_base="https://yoho.example/")
+    link = f"https://yoho.example/trip/{sent['trip_id']}"
+    assert notifier.sent[0]["body"].endswith(f"See this trip on your map: {link}")
+    [check] = user.store.list_due_checks(UID)
+    assert "Union Sq" not in json.dumps(check)  # the stored trip is encrypted
+
+    page = user.client.get(f"/trip/{sent['trip_id']}")
+    assert page.status_code == 200 and b"showEmailedTrip" in page.data
+    trip = user.client.get(f"/api/trips/{sent['trip_id']}").get_json()
+    assert trip["subject"] == "YoHo Alert: Dentist" and "See this trip" not in trip["body"]
+    assert "Take the L train 2 stops" in trip["body"] and trip["route"]["directions"] in trip["body"]
+    assert trip["route"]["start"] == {"kind": "home"} and trip["route"]["end"] == {"kind": "place", "lat": DENTIST[0], "lon": DENTIST[1]}
+    assert "40.71," not in json.dumps(trip["route"]["start"])  # no home coordinates
+    assert user.client.get("/api/trips/not-a-trip").status_code == 404
+
+
+def test_trip_link_is_only_for_its_owner_and_survives_login(user):
+    user.store.replace_calendar_events(UID, [event(user.cipher, "dentist", NOW + 3600)])
+    refresh_due_checks(user.store, UID, NOW - 3600)
+    [sent] = run_due_checks(user.store, user.cipher, LogNotifier(), NOW, geocode=geocode, route=fake_route([]))
+    user.client.post("/auth/logout")
+    assert user.client.get(f"/api/trips/{sent['trip_id']}").status_code == 401
+    page = user.client.get(f"/trip/{sent['trip_id']}")
+    assert page.status_code == 302 and page.headers["Location"].endswith("/login")
+    back = login(user)  # signing in returns to the link
+    assert back.headers["Location"] == f"/trip/{sent['trip_id']}"
+
+    other = "google-sub-other"
+    user.store.upsert_user(other, {"email": "other@example.com"})
+    with user.client.session_transaction() as sess:
+        sess["uid"] = other
+    assert user.client.get(f"/api/trips/{sent['trip_id']}").status_code == 404
+
+
+def test_login_never_redirects_off_site(user):
+    user.client.post("/auth/logout")
+    for evil in ("//evil.example/x", "https://evil.example", "/\\evil.example"):
+        with user.client.session_transaction() as sess:
+            sess["next"] = evil
+        assert login(user).headers["Location"] == "/"
 
 
 def test_late_added_event_is_sent_immediately_and_says_leave_now(user):

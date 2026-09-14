@@ -99,7 +99,8 @@ def station_status(station_ids: list[str] | None = None, line: str | None = None
                    *, live=fetch_live, alert_headers=fetch_alert_headers) -> list[dict]:
     """Status of the given stations and/or a line's stations:
     [{"station_id", "name", "lat", "lon", "lines", "alert_types", "alerts" (texts),
-      "delay_sec" (worst next-train delay, None without live data), "delayed_lines", "status"}]
+      "delay_sec" (worst next-train delay, None without live data), "delayed_lines",
+      "line_delays" (line -> its worst next-train delay_sec), "status"}]
     status is "alert", "delayed" or "ok". only_problems keeps alert/delayed stations."""
     nodes, waits = live()
     wanted = set(station_ids or [])
@@ -113,7 +114,8 @@ def station_status(station_ids: list[str] | None = None, line: str | None = None
         if line and not _line_matches(node["route"], line):
             continue
         s = by_station.setdefault(sid, {"station_id": sid, **stations()[sid], "lines": set(), "alert_types": set(),
-                                        "alert_nodes": [], "delay_sec": None, "delayed_lines": set()})
+                                        "alert_nodes": [], "delay_sec": None, "delayed_lines": set(),
+                                        "line_delays": {}})
         s["lines"].add(node["route"])
         if node.get("station_alert_count"):
             s["alert_types"].update(t for t in (node.get("station_alert_types") or "").split("|") if t)
@@ -121,6 +123,7 @@ def station_status(station_ids: list[str] | None = None, line: str | None = None
         delay = (waits.get(node["node_id"]) or {}).get("next_train_delay_sec")
         if delay is not None:
             s["delay_sec"] = max(s["delay_sec"] or 0, round(delay))
+            s["line_delays"][node["route"]] = max(s["line_delays"].get(node["route"], 0), round(delay))
             if delay >= DELAYED_SEC:
                 s["delayed_lines"].add(node["route"])
 
@@ -142,4 +145,34 @@ def station_status(station_ids: list[str] | None = None, line: str | None = None
             except requests.RequestException:
                 pass
         s["alerts"] = texts
+    return out
+
+
+def route_problems(steps: list[dict], *, live=fetch_live, alert_headers=fetch_alert_headers) -> list[dict]:
+    """Live trouble on a planned route (get_path-style steps), in route order:
+    [{"name", "alerts" (texts), "alert_types", "delays": [{"mode", "route", "delay_min"}]}]
+    for each subway station it rides through that has an incident alert or a
+    delayed train on a line the route rides there -- a late train on another
+    line at the same station doesn't count. [] when all's well; raises when the
+    snapshot service is down, so callers can tell "no problems" from "unknown"."""
+    from agent.directions import _rides
+    ridden: dict[str, set[str]] = {}  # station -> lines the route rides through it, in route order
+    for ride in _rides(steps):
+        if ride[0]["mode"] == "subway":
+            for step in ride:
+                ridden.setdefault(station_of(step["stop_id"]), set()).add(ride[0]["route"])
+    if not ridden:
+        return []
+    found = {s["station_id"]: s for s in station_status(list(ridden), only_problems=True,
+                                                         live=live, alert_headers=alert_headers)}
+    out = []
+    for sid, lines in ridden.items():
+        s = found.get(sid)
+        if s is None:
+            continue
+        delays = [{"mode": "subway", "route": route, "delay_min": round(sec / 60)}
+                  for route, sec in sorted(s["line_delays"].items())
+                  if sec >= DELAYED_SEC and any(_line_matches(route, line) or _line_matches(line, route) for line in lines)]
+        if s["status"] == "alert" or delays:
+            out.append({"name": s["name"], "alerts": s["alerts"], "alert_types": s["alert_types"], "delays": delays})
     return out

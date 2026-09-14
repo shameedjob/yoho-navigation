@@ -100,7 +100,7 @@ async function load(){
   const me=await yohoApi('/api/me');
   $('name').textContent=me.name||'Yoho rider';
   $('email').textContent=me.email||'';
-  $('usage').textContent=`${me.usage.used.toLocaleString()} of ${me.usage.limit.toLocaleString()} tokens used this month`;
+  $('usage').textContent=`${me.usage.used.toLocaleString()} of ${me.usage.limit.toLocaleString()} tokens used this week`;
   renderHome(me.home_set);
   const connected=me.calendar.connected;
   $('cal-connected').hidden=!connected; $('sync-btn').hidden=!connected;

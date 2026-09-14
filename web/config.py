@@ -10,10 +10,12 @@
   YOHO_STORE_PATH               file store location, default data/dev_store.pkl
   FIREBASE_CREDENTIALS          service-account JSON path; unset = Application Default Credentials
   FIREBASE_PROJECT_ID           optional
-  YOHO_MONTHLY_TOKEN_LIMIT      default per-user monthly tokens, default 200000
+  YOHO_WEEKLY_TOKEN_LIMIT       default per-user weekly tokens (UTC ISO week), default 2000000
   YOHO_AGENT_MODEL              Amazon Bedrock Mantle model id, e.g. google.gemma-4-26b-a4b (region: AWS_REGION);
                                 unset = local Ollama gemma4:e2b
   YOHO_DEV                      "1" allows http:// OAuth redirects and non-Secure cookies
+  YOHO_PUBLIC_BASE_URL          the app's origin as riders reach it, for links in alert emails;
+                                default: the origin of GOOGLE_REDIRECT_URI
   YOHO_WEBHOOK_BASE_URL         public HTTPS origin Google can reach (e.g. an ngrok URL);
                                 unset = no calendar push notifications
   YOHO_SNS_TOPIC_ARN            SNS topic for alert emails; unset = alerts are only logged
@@ -26,6 +28,13 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from urllib.parse import urlsplit
+
+
+def _origin(url: str) -> str:
+    """"https://yoho.example/auth/google/callback" -> "https://yoho.example"."""
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}"
 
 
 @dataclass(frozen=True)
@@ -39,9 +48,10 @@ class Settings:
     store_path: str = "data/dev_store.pkl"
     firebase_credentials: str | None = None
     firebase_project_id: str | None = None
-    monthly_token_limit: int = 200_000
+    weekly_token_limit: int = 2_000_000
     dev: bool = False
     webhook_base_url: str | None = None
+    public_base_url: str | None = None
     sns_topic_arn: str | None = None
     aws_region: str | None = None
     agent_model: str | None = None
@@ -53,19 +63,21 @@ class Settings:
                    if not os.environ.get(k)]
         if missing:
             raise RuntimeError(f"missing required environment variables: {', '.join(missing)}")
+        redirect_uri = os.environ.get("GOOGLE_REDIRECT_URI", "http://localhost:5000/auth/google/callback")
         return cls(
             secret_key=os.environ["FLASK_SECRET_KEY"],
             google_client_id=os.environ["GOOGLE_CLIENT_ID"],
             google_client_secret=os.environ["GOOGLE_CLIENT_SECRET"],
-            google_redirect_uri=os.environ.get("GOOGLE_REDIRECT_URI", "http://localhost:5000/auth/google/callback"),
+            google_redirect_uri=redirect_uri,
             data_keys=os.environ["YOHO_DATA_KEYS"],
             store=os.environ.get("YOHO_STORE", "firestore"),
             store_path=os.environ.get("YOHO_STORE_PATH", "data/dev_store.pkl"),
             firebase_credentials=os.environ.get("FIREBASE_CREDENTIALS") or None,
             firebase_project_id=os.environ.get("FIREBASE_PROJECT_ID") or None,
-            monthly_token_limit=int(os.environ.get("YOHO_MONTHLY_TOKEN_LIMIT", "200000")),
+            weekly_token_limit=int(os.environ.get("YOHO_WEEKLY_TOKEN_LIMIT", "2000000")),
             dev=os.environ.get("YOHO_DEV") == "1",
             webhook_base_url=os.environ.get("YOHO_WEBHOOK_BASE_URL") or None,
+            public_base_url=os.environ.get("YOHO_PUBLIC_BASE_URL") or _origin(redirect_uri),
             sns_topic_arn=os.environ.get("YOHO_SNS_TOPIC_ARN") or None,
             aws_region=os.environ.get("AWS_REGION") or None,
             agent_model=os.environ.get("YOHO_AGENT_MODEL") or None,
