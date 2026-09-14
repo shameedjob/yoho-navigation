@@ -45,6 +45,11 @@ html.dark,html.dark body{background:var(--color-neutral-900);color-scheme:dark}
    around the bubbles; only the bubbles and the dock catch them. */
 .thread{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:10px;width:min(640px,100%);pointer-events:none;scrollbar-width:none}
 .thread::-webkit-scrollbar{display:none}
+/* Touch: iOS won't scroll a container that has pointer-events:none, so once the thread overflows it
+   takes every touch in its area and swipes scroll the chat, not the map (hide the chat to pan). */
+@media (hover:none) and (pointer:coarse){
+  .thread.scrollable{pointer-events:auto;touch-action:pan-y;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+}
 .dock{width:min(640px,100%);margin-top:10px;pointer-events:auto}
 .bubble-row{display:flex;width:100%}
 .bubble{pointer-events:auto;display:flex;align-items:flex-start;gap:9px;max-width:82%;padding:12px 14px;border-radius:calc(var(--radius-lg)*1.15);box-shadow:var(--shadow-md);backdrop-filter:blur(6px)}
@@ -159,6 +164,18 @@ function setChatOpen(open){
 chatToggleBtn.addEventListener('click',()=>setChatOpen(!chatOpen));
 
 const thread=document.getElementById('thread');
+// Keep the newest message in view: whenever the thread's content or size changes (a reply
+// rendering, the keyboard opening, the chat being re-shown), jump to the end, unless the user has
+// scrolled up to read. A new message always jumps back to the end.
+let threadAtEnd=true;
+function scrollThreadToEnd(){ threadAtEnd=true; thread.scrollTop=thread.scrollHeight; }
+thread.addEventListener('scroll',()=>{ threadAtEnd=thread.scrollHeight-thread.scrollTop-thread.clientHeight<40; },{passive:true});
+function onThreadChange(){
+  thread.classList.toggle('scrollable',thread.scrollHeight>thread.clientHeight+1);
+  if(threadAtEnd) thread.scrollTop=thread.scrollHeight;
+}
+new ResizeObserver(onThreadChange).observe(thread);
+new MutationObserver(onThreadChange).observe(thread,{childList:true,subtree:true,characterData:true});
 const input=document.getElementById('chat-input');
 const sendBtn=document.getElementById('send-btn');
 function addBubble(text,fromUser){
@@ -171,7 +188,7 @@ function addBubble(text,fromUser){
   }
   const p=document.createElement('div'); p.className='msg'; p.textContent=text;
   b.appendChild(p); row.appendChild(b); thread.appendChild(row);
-  thread.scrollTop=thread.scrollHeight;
+  scrollThreadToEnd();
   return {row,bubble:b,p};
 }
 
@@ -250,7 +267,7 @@ async function deliver(val){
   }finally{
     stopStatus(); pending.bubble.classList.remove('pending');
     sending=false; sendBtn.disabled=false; input.focus();
-    thread.scrollTop=thread.scrollHeight;
+    scrollThreadToEnd();
   }
 }
 document.getElementById('dock').addEventListener('submit',send);
@@ -272,7 +289,7 @@ async function showEmailedTrip(id){
       :"Couldn't load that trip. Try again.";
   }finally{
     note.bubble.classList.remove('pending');
-    thread.scrollTop=thread.scrollHeight;
+    scrollThreadToEnd();
   }
 }
 if(TRIP_ID) showEmailedTrip(TRIP_ID);
