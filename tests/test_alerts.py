@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from accounts.alerts import (ALERT_LEAD_SEC, due_check_id, ensure_email_subscription, refresh_due_checks,
+from accounts.alerts import (ALERT_LEAD_SEC, PLAN_AHEAD_SEC, due_check_id, ensure_email_subscription, refresh_due_checks,
                              renew_watches, run_due_checks, token_hash)
 from accounts.home import Home, save_home
 from integrations.aws import LogNotifier, SnsNotifier
@@ -62,7 +62,7 @@ def test_refresh_due_checks_picks_timed_future_events_with_a_location(user):
     assert refresh_due_checks(user.store, UID, NOW) == 1
     [check] = user.store.list_due_checks(UID)
     assert check["id"] == due_check_id(UID, "dentist")
-    assert check["check_at"] == NOW + 3 * 3600 - ALERT_LEAD_SEC and check["status"] == "pending"
+    assert check["check_at"] == NOW + 3 * 3600 - PLAN_AHEAD_SEC and check["phase"] == "plan" and check["status"] == "pending"
 
 
 def test_resync_keeps_sent_checks_but_reschedules_moved_events(user):
@@ -87,9 +87,9 @@ def test_due_check_sends_one_email_with_directions_then_stops(user):
     assert result["status"] == "sent"
     assert calls == [((40.71, -73.95), DENTIST, NOW + 3600)]  # from home, arriving at the start
     [mail] = notifier.sent
-    assert mail["uid"] == UID and "Dentist" in mail["subject"] and "Leave by" in mail["subject"]
+    assert mail["uid"] == UID and mail["subject"] == "YoHo Alert: Dentist"
     assert "Take the L train 2 stops, Bedford Av to Union Sq." in mail["body"]
-    assert "Starting from home." in mail["body"] and "40.71" not in mail["body"]  # no home coordinates
+    assert "follow this route from home" in mail["body"] and "40.71" not in mail["body"]  # no home coordinates
     assert run_due_checks(user.store, user.cipher, notifier, NOW + 60, geocode=geocode, route=fake_route([])) == []
     assert len(notifier.sent) == 1
 
@@ -105,7 +105,7 @@ def test_trip_starts_at_the_current_event(user):
     geo = lambda a: (40.7527, -73.9772) if "42nd" in a else geocode(a)
     run_due_checks(user.store, user.cipher, notifier, NOW, geocode=geo, route=fake_route(calls))
     assert calls[0][0] == (40.7527, -73.9772)
-    assert "Starting from your current event (Work)." in notifier.sent[0]["body"]
+    assert "follow this route from your current event (Work)" in notifier.sent[0]["body"]
 
 
 def test_failures_retry_then_give_up_and_started_events_expire(user):
@@ -193,3 +193,72 @@ def test_sns_subscribes_with_uid_filter_and_publishes_with_uid_attribute(user):
     assert sub["Protocol"] == "email" and sub["Endpoint"] == "rider@example.com"
     assert json.loads(sub["Attributes"]["FilterPolicy"]) == {"uid": [UID]}
     assert pub["MessageAttributes"]["uid"]["StringValue"] == UID and len(pub["Subject"]) == 100
+
+
+def test_parse_local_time_understands_worded_times():
+    from zoneinfo import ZoneInfo
+    from accounts.trips import parse_local_time
+    ny = ZoneInfo("America/New_York")
+    now = int(datetime(2026, 9, 13, 22, 16, tzinfo=ny).timestamp())  # a Sunday night
+    at = lambda *a: int(datetime(*a, tzinfo=ny).timestamp())
+    assert parse_local_time("Monday 14:00", now) == at(2026, 9, 14, 14, 0)
+    assert parse_local_time("monday at 2pm", now) == at(2026, 9, 14, 14, 0)
+    assert parse_local_time("2pm", now) == at(2026, 9, 14, 14, 0)        # already past today -> tomorrow
+    assert parse_local_time("today 23:00", now) == at(2026, 9, 13, 23, 0)
+    assert parse_local_time("Sunday 20:00", now) == at(2026, 9, 20, 20, 0)  # tonight's has passed -> next week
+    assert parse_local_time("2026-09-15 08:00", now) == at(2026, 9, 15, 8, 0)
+    with pytest.raises(ValueError):
+        parse_local_time("whenever", now)
+
+
+def test_leave_by_uses_a_start_the_user_named_even_without_home(env):  # noqa: F811
+    from accounts.trips import plan_leave_by
+    login(env)  # no home set
+    calls = []
+    plan = plan_leave_by(env.store, env.cipher, UID, DENTIST, NOW + 3600, NOW,
+                         geocode=geocode, route=fake_route(calls), start=(40.6847, -73.9773))
+    assert plan["start_source"] == "given" and calls[0][0] == (40.6847, -73.9773)
+
+
+def test_leave_by_tool_starts_from_the_device_location_only_for_soon_trips(env, monkeypatch):  # noqa: F811
+    from zoneinfo import ZoneInfo
+    from agent import agent_interaction as ai
+    login(env)
+    save_home(env.store, env.cipher, UID, Home("home", 40.6782, -73.9442))
+    calls = []
+    router = fake_route(calls)
+    monkeypatch.setattr(ai, "transit_router", lambda start, end, arrive, avoid=None: router(start, end, arrive))
+    monkeypatch.setattr(ai.time, "time", lambda: NOW)
+    here = (40.7359, -73.9911)
+    leave_by = {t.tool_name: t for t in ai.make_user_tools(UID, env.store, env.cipher, location=here)}["leave_by"]
+    local = lambda ts: datetime.fromtimestamp(ts, ZoneInfo("America/New_York")).strftime("%Y-%m-%d %H:%M")
+
+    assert leave_by(destination=DENTIST, arrival_time=local(NOW + 3600))["start_source"] == "current_location"
+    assert leave_by(destination=DENTIST, arrival_time=local(NOW + 86400))["start_source"] == "home"  # tomorrow
+    assert [c[0] for c in calls] == [here, (40.6782, -73.9442)]
+
+
+def test_alert_is_sent_an_hour_before_leaving_not_before_the_event(user):
+    """plan phase learns the leave time; the send phase runs lead time before it."""
+    user.store.replace_calendar_events(UID, [event(user.cipher, "dentist", NOW + 4 * 3600)])
+    refresh_due_checks(user.store, UID, NOW - 3600)
+    [check] = user.store.list_due_checks(UID)
+    notifier, calls = LogNotifier(), []
+    # the plan phase runs PLAN_AHEAD_SEC before the event and sends nothing
+    [planned] = run_due_checks(user.store, user.cipher, notifier, check["check_at"], geocode=geocode, route=fake_route(calls))
+    leave = NOW + 4 * 3600 - 1500  # the fake trip takes 25 min
+    assert planned["status"] == "planned" and planned["send_at"] == leave - ALERT_LEAD_SEC and notifier.sent == []
+    assert run_due_checks(user.store, user.cipher, notifier, planned["send_at"] - 60, geocode=geocode, route=fake_route(calls)) == []
+    [sent] = run_due_checks(user.store, user.cipher, notifier, planned["send_at"], geocode=geocode, route=fake_route(calls))
+    assert sent["status"] == "sent" and len(calls) == 2  # routed again with fresh data at send time
+    body = notifier.sent[0]["body"]
+    assert body.startswith("Your trip to 10 Union Sq E, New York is on schedule.") and body.rstrip().endswith("ETA: 12:00 PM")
+
+
+def test_late_added_event_is_sent_immediately_and_says_leave_now(user):
+    user.store.replace_calendar_events(UID, [event(user.cipher, "dentist", NOW + 600)])  # 10 min away, 25 min trip
+    refresh_due_checks(user.store, UID, NOW)
+    notifier = LogNotifier()
+    [sent] = run_due_checks(user.store, user.cipher, notifier, NOW, geocode=geocode, route=fake_route([]))
+    assert sent["status"] == "sent" and "running behind" in notifier.sent[0]["body"]
+    assert "Leave now" in notifier.sent[0]["body"] and "ETA: 8:25 AM" in notifier.sent[0]["body"]

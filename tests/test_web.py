@@ -11,7 +11,7 @@ from accounts.calendar_sync import REFRESH_TOKEN_FIELD
 from accounts.home import load_home
 from integrations.google import CalendarAccessRevoked, GoogleIdentity, TokenGrant
 from integrations.google.oauth import CALENDAR_SCOPE, SCOPES
-from storage import DecryptionError, FieldCipher, MemoryStore, usage_period
+from storage import DecryptionError, FieldCipher, FileStore, MemoryStore, usage_period
 from storage.crypto import generate_key_entry
 from web import create_app
 from web.config import Settings
@@ -83,7 +83,7 @@ def env(monkeypatch):
     monkeypatch.setattr("accounts.calendar_sync.fetch_upcoming_events", fake_fetch)
     app = create_app(settings, store=store, oauth=oauth,
                      geocode=lambda addr: (40.7128, -74.0060) if "Water" in addr else None,
-                     agent_factory=lambda uid, store, cipher, history: FakeAgent(history, **agent_opts))
+                     agent_factory=lambda uid, store, cipher, history, location=None: agent_opts.setdefault("locations", []).append(location) or FakeAgent(history, **{k: v for k, v in agent_opts.items() if k != "locations"}))
     app.testing = True
     return SimpleNamespace(app=app, client=app.test_client(), store=store, oauth=oauth, fetch=fetch,
                            agent_opts=agent_opts, cipher=app.extensions["yoho"].cipher)
@@ -154,6 +154,32 @@ def test_pages_and_api_require_login(env):
     assert env.client.get("/profile").status_code == 200
 
 
+def test_session_is_permanent_and_survives_restart_with_file_store(env, tmp_path):
+    path = tmp_path / "store.pkl"
+    store = FileStore(path)
+    app = create_app(env.app.extensions["yoho"].settings, store=store, oauth=env.oauth, agent_factory=lambda *a, **k: None)
+    client = app.test_client()
+    client.get("/auth/google/login")
+    resp = client.get("/auth/google/callback?state=state-abc&code=the-code")
+    cookie = next(h for h in resp.headers.getlist("Set-Cookie") if h.startswith("yoho_session="))
+    assert "Expires=" in cookie  # kept by the browser across closes, not a session-only cookie
+
+    restarted = create_app(app.extensions["yoho"].settings, store=FileStore(path), oauth=env.oauth,
+                           agent_factory=lambda *a, **k: None).test_client()
+    restarted.set_cookie("yoho_session", client.get_cookie("yoho_session").value)
+    assert restarted.get("/").status_code == 200
+    assert restarted.get("/api/me").status_code == 200
+
+
+def test_chat_passes_browser_location_to_agent_only_when_valid(env):
+    login(env)
+    headers = {"X-Yoho-Request": "1"}
+    for location in ({"lat": 40.7359, "lon": -73.9911}, None, {"lat": "x", "lon": 1}, {"lat": 51.5, "lon": -0.12}):
+        assert env.client.post("/api/chat", json={"message": "hi", "location": location}, headers=headers).status_code == 200
+    assert env.agent_opts["locations"] == [(40.7359, -73.9911), None, None, None]  # bad and out-of-area ignored
+    assert "40.7359" not in str(env.store.get_user(UID)) + str(env.store.get_conversation(UID))  # never stored
+
+
 def test_writes_require_custom_header(env):
     login(env)
     assert env.client.post("/api/chat", json={"message": "hi"}).status_code == 403
@@ -187,11 +213,29 @@ def test_home_tool_routes_without_returning_home(env, monkeypatch):
     login(env)
     env.client.put("/api/me/home", json={"lat": 40.75, "lon": -73.99}, headers=WRITE)
     calls = []
-    fake_tools = SimpleNamespace(get_path=lambda start, end, departure_time=None: calls.append((start, end)) or {"steps": []})
+    fake_tools = SimpleNamespace(get_path=lambda start, end, departure_time=None, avoid=None: calls.append((start, end)) or {"steps": []})
     monkeypatch.setitem(__import__("sys").modules, "agent.tools", fake_tools)
-    route_from_home = make_user_tools(UID, env.store, env.cipher)[0]
+    route_from_home = {t.tool_name: t for t in make_user_tools(UID, env.store, env.cipher)}["route_from_home"]
     assert route_from_home(destination=(40.70, -74.01)) == {"steps": []}
     assert calls == [((40.75, -73.99), (40.70, -74.01))]
+
+
+def test_current_location_tools_route_from_here_and_say_when_unknown(env, monkeypatch):
+    from agent.agent_interaction import make_user_tools
+    login(env)
+    env.client.put("/api/me/home", json={"lat": 40.75, "lon": -73.99}, headers=WRITE)
+    calls = []
+    fake_tools = SimpleNamespace(get_path=lambda start, end, departure_time=None, avoid=None: calls.append((start, end)) or {"steps": []})
+    monkeypatch.setitem(__import__("sys").modules, "agent.tools", fake_tools)
+    here = (40.7359, -73.9911)
+    tools = {t.tool_name: t for t in make_user_tools(UID, env.store, env.cipher, location=here)}
+    assert tools["route_from_here"](destination=(40.70, -74.01)) == {"steps": []}
+    assert tools["route_to_home"]() == {"steps": []}  # no start: leaves from here
+    assert calls == [(here, (40.70, -74.01)), (here, (40.75, -73.99))]
+
+    unknown = {t.tool_name: t for t in make_user_tools(UID, env.store, env.cipher)}
+    assert unknown["route_from_here"](destination=(40.70, -74.01))["error"] == "no_location"
+    assert unknown["route_to_home"]()["error"] == "no_location"
 
 
 # --- calendar -------------------------------------------------------------
@@ -309,3 +353,39 @@ def test_chat_says_route_is_on_the_map_when_the_model_forgets(env, monkeypatch):
     monkeypatch.setattr(FakeAgent, "__call__", call_with_route)
     body = env.client.post("/api/chat", json={"message": "Route to Union Square"}, headers=WRITE).get_json()
     assert body["reply"] == "Take the 6. I've highlighted the route on your map."
+
+
+def test_dotenv_values_drop_inline_comments():
+    from web.__main__ import _dotenv_value
+    assert _dotenv_value("memory            # firestore in production") == "memory"
+    assert _dotenv_value("            # path to service-account JSON") == ""
+    assert _dotenv_value('"keep # this"') == "keep # this"
+    assert _dotenv_value("abc#def") == "abc#def"
+
+
+def test_loading_the_chat_page_starts_a_fresh_conversation(env):
+    login(env)
+    env.client.post("/api/chat", json={"message": "How do I get to Union Square?"}, headers=WRITE)
+    assert len(env.store.get_conversation(UID)) == 2
+    assert env.client.get("/").status_code == 200
+    assert env.store.get_conversation(UID) == []
+    agent_history = []
+    env.app.extensions["yoho"].agent_factory = lambda uid, store, cipher, history, location=None: agent_history.append(list(history)) or FakeAgent(history)
+    env.client.post("/api/chat", json={"message": "hi again"}, headers=WRITE)
+    assert agent_history == [[]]  # the agent after a reload sees no earlier turns
+
+
+def test_a_page_load_only_clears_that_users_conversation(env):
+    login(env)
+    other = "google-sub-other"
+    env.store.upsert_user(other, {"email": "other@example.com"})
+    env.store.set_conversation(other, [{"role": "user", "content": [{"text": "their trip"}]}])
+    env.client.post("/api/chat", json={"message": "my trip"}, headers=WRITE)
+
+    other_client = env.app.test_client()
+    with other_client.session_transaction() as session:
+        session["uid"] = other
+    assert other_client.get("/").status_code == 200  # the other user reloads their chat
+
+    assert env.store.get_conversation(other) == []
+    assert len(env.store.get_conversation(UID)) == 2  # ours is untouched

@@ -23,7 +23,12 @@ def _signed_in() -> bool:
 
 @bp.get("/")
 def chat():
-    return render_template("chat.html") if _signed_in() else redirect(url_for("pages.login"))
+    if not _signed_in():
+        return redirect(url_for("pages.login"))
+    # Each page load starts a fresh conversation: the page shows only the greeting,
+    # so the agent mustn't keep answering from history the user can no longer see.
+    services().store.set_conversation(current_uid(), [])
+    return render_template("chat.html")
 
 
 @bp.get("/profile")

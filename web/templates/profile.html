@@ -13,7 +13,7 @@
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
       </a>
       <h4 style="margin:0;flex:1">Profile</h4>
-      <form method="post" action="{{ url_for('auth.logout') }}" style="margin:0">
+      <form method="post" action="{{ url_for('auth.logout') }}" style="margin:0" onsubmit="yohoForgetLocation()">
         <button class="btn btn-ghost" style="font-size:13px">Sign out</button>
       </form>
     </div>
@@ -147,7 +147,7 @@ $('delete-btn').addEventListener('click',()=>{ $('dialog').hidden=false; $('canc
 $('cancel-delete').addEventListener('click',()=>{ $('dialog').hidden=true; });
 $('confirm-delete').addEventListener('click',async()=>{
   $('confirm-delete').disabled=true;
-  try{ await yohoApi('/api/me',{method:'DELETE'}); window.location.href='/login'; }
+  try{ await yohoApi('/api/me',{method:'DELETE'}); yohoForgetLocation(); window.location.href='/login'; }
   catch(_){ $('confirm-delete').disabled=false; }
 });
 

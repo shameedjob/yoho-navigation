@@ -33,22 +33,27 @@ def route_summary(steps: list[dict], total_time_sec: float) -> dict:
             "transfers": max(0, len(rides) - 1)}
 
 
-def route_legs(steps: list[dict], walk_in_sec: float | None = None,
-               walk_out_sec: float | None = None) -> list[dict]:
+def route_legs(steps: list[dict], walk_in_sec: float | None = None, walk_out_sec: float | None = None,
+               start: tuple[float, float] | None = None, end: tuple[float, float] | None = None) -> list[dict]:
     """The route as legs for the browser to draw: walks and rides in order, each
-    ride with its line and every stop (name, lat, lon) along it."""
+    ride with its line and every stop (name, lat, lon) along it. With `start` /
+    `end` coordinates, the first walk gets a `from` and the last a `to` point, so
+    the walks to and from the network can be drawn too; without them (e.g. the
+    user's private home) those ends stay "start" / "destination"."""
     rides = _rides(steps)
     point = lambda s: {"stop_id": s["stop_id"], "stop_name": s["stop_name"], "lat": s["lat"], "lon": s["lon"]}
+    origin = {"stop_name": "Start", "lat": start[0], "lon": start[1]} if start else "start"
+    destination = {"stop_name": "Destination", "lat": end[0], "lon": end[1]} if end else "destination"
     if not rides:
-        return [{"type": "walk", "to": "destination", "sec": walk_in_sec}]
-    legs: list[dict] = [{"type": "walk", "to": point(rides[0][0]),
+        return [{"type": "walk", "from": origin, "to": destination, "sec": walk_in_sec}]
+    legs: list[dict] = [{"type": "walk", "from": origin, "to": point(rides[0][0]),
                          "sec": walk_in_sec if rides[0][0] is steps[0] else None}]
     for n, ride in enumerate(rides):
         if n:  # always: same-named stops (Fulton St on the C and the 4) are still different platforms
             legs.append({"type": "walk", "from": point(rides[n - 1][-1]), "to": point(ride[0]), "sec": None})
         legs.append({"type": "ride", "mode": ride[0]["mode"], "route": ride[0]["route"],
                      "stops": len(ride) - 1, "path": [point(s) for s in ride]})
-    legs.append({"type": "walk", "from": point(rides[-1][-1]), "to": "destination",
+    legs.append({"type": "walk", "from": point(rides[-1][-1]), "to": destination,
                  "sec": walk_out_sec if rides[-1][-1] is steps[-1] else None})
     return legs
 

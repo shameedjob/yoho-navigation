@@ -2,7 +2,7 @@
 frontend pages, all from one Flask app so the browser talks to one origin
 with one session cookie (no CORS, no tokens in JavaScript).
 
-    YOHO_DEV=1 YOHO_STORE=memory python -m web          # local
+    YOHO_DEV=1 YOHO_STORE=file python -m web            # local, kept across restarts
     gunicorn -w 2 "web:create_app()"                     # production
 
 Dependencies are built once in create_app and hung off app.extensions["yoho"];
@@ -20,7 +20,7 @@ from flask import Flask
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from integrations.google import GoogleOAuth
-from storage import FieldCipher, MemoryStore, UserStore
+from storage import FieldCipher, FileStore, MemoryStore, UserStore
 
 from .config import Settings
 
@@ -45,9 +45,14 @@ def _nominatim_geocode(address: str) -> tuple[float, float] | None:
         return client.geocode(address)
 
 
-def _default_agent_factory(uid: str, store: UserStore, cipher: FieldCipher, history: list[dict]):
-    from agent.agent_interaction import build_agent
-    return build_agent(uid, store, cipher, history)
+def make_agent_factory(settings: Settings) -> Callable[..., Any]:
+    """build_agent on the model the settings name (Bedrock, else local Ollama)."""
+    def factory(uid: str, store: UserStore, cipher: FieldCipher, history: list[dict],
+                location: tuple[float, float] | None = None):
+        from agent.agent_interaction import build_agent
+        return build_agent(uid, store, cipher, history, location=location,
+                           model_id=settings.agent_model, region=settings.aws_region)
+    return factory
 
 
 def make_notifier(settings: Settings):
@@ -68,6 +73,21 @@ def _run_in_thread_pool(fn: Callable[[], None]):
     return _background.submit(fn)
 
 
+def _start_warmup() -> None:
+    """Load the agent's graph model and transit graph on a background thread, so
+    the server answers right away and the first chat doesn't wait ~15s."""
+    def run() -> None:
+        import logging
+        try:
+            from agent.tools import warm_up
+            warm_up()
+        except Exception:
+            logging.getLogger(__name__).exception("startup warm-up failed; requests will load lazily")
+
+    import threading
+    threading.Thread(target=run, name="yoho-warmup", daemon=True).start()
+
+
 def create_app(settings: Settings | None = None, *, store: UserStore | None = None, oauth: GoogleOAuth | None = None,
                geocode: Geocoder | None = None, agent_factory: Callable[..., Any] | None = None,
                notifier: Any = None, run_background: Callable[[Callable[[], None]], Any] | None = None) -> Flask:
@@ -78,6 +98,8 @@ def create_app(settings: Settings | None = None, *, store: UserStore | None = No
     if store is None:
         if settings.store == "memory":
             store = MemoryStore()
+        elif settings.store == "file":
+            store = FileStore(settings.store_path)
         else:
             from storage.firestore_store import FirestoreStore
             store = FirestoreStore(settings.firebase_credentials, settings.firebase_project_id)
@@ -101,10 +123,13 @@ def create_app(settings: Settings | None = None, *, store: UserStore | None = No
         cipher=FieldCipher.from_env_value(settings.data_keys),
         oauth=oauth or GoogleOAuth(settings.google_client_id, settings.google_client_secret, settings.google_redirect_uri),
         geocode=geocode or _nominatim_geocode,
-        agent_factory=agent_factory or _default_agent_factory,
+        agent_factory=agent_factory or make_agent_factory(settings),
         notifier=notifier or make_notifier(settings),
         run_background=run_background or _run_in_thread_pool,
     )
+
+    if settings.warmup:
+        _start_warmup()
 
     from . import api, auth, calendar_webhooks, pages
     app.register_blueprint(auth.bp)

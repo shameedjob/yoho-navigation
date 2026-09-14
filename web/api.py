@@ -9,7 +9,7 @@ import threading
 from flask import Blueprint, jsonify, request, session
 
 from accounts.calendar_sync import REFRESH_TOKEN_FIELD, CalendarNotConnected, calendar_connected, sync_calendar
-from accounts.home import Home, HomeOutOfArea, clear_home, has_home, save_home
+from accounts.home import Home, HomeOutOfArea, clear_home, has_home, in_service_area, save_home
 from accounts.quota import quota_status, record_usage
 from integrations.google import CalendarAccessRevoked
 
@@ -103,13 +103,28 @@ def calendar_events(uid: str):
                            for e in events])
 
 
+def _client_location(value) -> tuple[float, float] | None:
+    """The browser's {"lat", "lon"} sent with a chat message, if usable. It's used
+    for this request only and never stored; anything invalid or outside the
+    service area is ignored, and the agent then says it doesn't know where the user is."""
+    if not isinstance(value, dict):
+        return None
+    try:
+        lat, lon = float(value["lat"]), float(value["lon"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return (lat, lon) if in_service_area(lat, lon) else None
+
+
 @bp.post("/chat")
 @login_required_api
 def chat(uid: str):
-    from agent.agent_interaction import reply_text, route_payload, token_usage, trim_history
+    from agent.agent_interaction import (places_payload, reply_text, route_payload, stations_payload, token_usage,
+                                         trim_history)
 
     svc = services()
-    message = ((request.get_json(silent=True) or {}).get("message") or "").strip()
+    body = request.get_json(silent=True) or {}
+    message = str(body.get("message") or "").strip()
     if not message:
         return _error("empty_message", 400)
     if len(message) > MAX_MESSAGE_CHARS:
@@ -124,7 +139,8 @@ def chat(uid: str):
             return _error("request_in_progress", 409)
         _inflight.add(uid)
     try:
-        agent = svc.agent_factory(uid, svc.store, svc.cipher, svc.store.get_conversation(uid))
+        agent = svc.agent_factory(uid, svc.store, svc.cipher, svc.store.get_conversation(uid),
+                                  location=_client_location(body.get("location")))
         try:
             result = agent(message)
         finally:
@@ -142,9 +158,10 @@ def chat(uid: str):
     # The route is sent as data built in code, not by the model: the browser shows
     # its directions and can draw its legs. route is null when none was planned.
     reply, route = reply_text(result), route_payload(agent)
+    places = None if route else places_payload(agent)  # a planned route supersedes the search that led to it
     if route and "map" not in reply.lower():
         reply = f"{reply} I've highlighted the route on your map.".strip()
-    return jsonify(reply=reply, route=route,
+    return jsonify(reply=reply, route=route, places=places, stations=stations_payload(agent),
                    usage=quota_status(svc.store, uid, svc.settings.monthly_token_limit).as_dict())
 
 

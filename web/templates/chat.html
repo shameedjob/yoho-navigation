@@ -3,7 +3,10 @@
 {% block head %}
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H" crossorigin="anonymous">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@15.0.12/marked.min.js" integrity="sha384-948ahk4ZmxYVYOc+rxN1H2gM1EJ2Duhp7uHtZ4WSLkV4Vtx5MUqnV+l7u9B+jFv+" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js" integrity="sha384-JEyTNhjM6R1ElGoJns4U2Ln4ofPcqzSsynQkmEc/KGy6336qAZl70tDLufbkla+3" crossorigin="anonymous"></script>
 <script src="{{ url_for('static', filename='route_map.js') }}"></script>
+<script src="{{ url_for('static', filename='transit_badges.js') }}"></script>
 <style>
 html,body{height:100%}
 body{margin:0;overflow:hidden}
@@ -11,28 +14,60 @@ body{margin:0;overflow:hidden}
 .app.dark{background:var(--color-neutral-900)}
 .tiles-mono .leaflet-tile-pane{filter:saturate(.3) contrast(1.15) brightness(1.03)}
 .tiles-dark .leaflet-tile-pane{filter:invert(.9) hue-rotate(180deg) brightness(.92) contrast(1.08) saturate(1.15)}
-/* The tint is a map pane between the tiles and the route (was a div over the whole map, which recolored route lines too). */
-.leaflet-tint-pane{mix-blend-mode:color;pointer-events:none}
-.leaflet-tint-pane path{fill:var(--color-accent-500);fill-opacity:.7;stroke:none}
-.app.dark .leaflet-tint-pane path{fill-opacity:.32}
+/* Leaflet's panes and controls carry z-index 400-1000. z-index:0 makes #map its own stacking
+   context so they stay inside it, under the chat overlay (z-index:1). */
+#map{z-index:0}
+.yoho-waypoint{display:flex;align-items:center;justify-content:center;border-radius:50%;background:#1b1b1b;color:#fff;border:3px solid #fff;box-shadow:var(--shadow-md);font:700 11px/1 var(--font-body)}
+.yoho-status{display:flex;align-items:center;justify-content:center;border-radius:50%;border:2px solid #fff;box-shadow:var(--shadow-md);color:#fff;font:800 11px/1 var(--font-body)}
+.yoho-status-alert{background:#D32F2F;font-size:14px}
+.yoho-status-late{background:#E4572E}
+.yoho-status-slow{background:#E8A317;color:#1b1b1b}
+.yoho-status-ok{background:#2E9E5B}
+/* Leaflet positions markers with an inline transform, so pin effects avoid transform. */
+.yoho-place-pin.clickable{cursor:pointer}
+.yoho-place-pin.clickable:hover{filter:brightness(1.25);box-shadow:0 0 0 3px var(--color-accent-500),var(--shadow-md)}
+.yoho-place-pin.picked{background:var(--color-accent-2)}
+.yoho-place-pin.dimmed{opacity:.45}
+.yoho-place-pin{transition:opacity .15s,filter .15s;display:flex;align-items:center;justify-content:center;border-radius:50%;background:var(--color-accent-700);color:#fff;border:3px solid #fff;box-shadow:var(--shadow-md);font:700 12px/1 var(--font-body)}
 .leaflet-control-attribution{background:color-mix(in srgb, var(--color-bg) 75%, transparent) !important;font-size:8.5px !important;padding:1px 4px !important;color:var(--color-text) !important;opacity:.65}
 .app.dark .leaflet-control-attribution{background:color-mix(in srgb, var(--color-neutral-900) 75%, transparent) !important;color:var(--color-neutral-100) !important}
 .leaflet-container{background:var(--color-surface) !important}
 .leaflet-container img{max-width:none !important}
 .frame{position:relative;flex:1;min-height:0;border-radius:var(--radius-lg);overflow:hidden;box-shadow:var(--shadow-lg)}
-.overlay{position:absolute;inset:0;display:flex;flex-direction:column;align-items:flex-end;padding:clamp(14px,2.4vw,26px);pointer-events:none}
-.thread{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:10px;width:min(640px,100%);pointer-events:auto;scrollbar-width:none}
+.overlay{position:absolute;inset:0;z-index:1;display:flex;flex-direction:column;align-items:flex-end;padding:clamp(14px,2.4vw,26px);pointer-events:none}
+/* The thread lets pointer events through its empty space so the map can be dragged and zoomed
+   around the bubbles; only the bubbles and the dock catch them. */
+.thread{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:10px;width:min(640px,100%);pointer-events:none;scrollbar-width:none}
 .thread::-webkit-scrollbar{display:none}
 .dock{width:min(640px,100%);margin-top:10px;pointer-events:auto}
 .bubble-row{display:flex;width:100%}
-.bubble{display:flex;align-items:flex-start;gap:9px;max-width:82%;padding:12px 14px;border-radius:calc(var(--radius-lg)*1.15);box-shadow:var(--shadow-md);backdrop-filter:blur(6px)}
+.bubble{pointer-events:auto;display:flex;align-items:flex-start;gap:9px;max-width:82%;padding:12px 14px;border-radius:calc(var(--radius-lg)*1.15);box-shadow:var(--shadow-md);backdrop-filter:blur(6px)}
 .bubble.agent{background:color-mix(in srgb, var(--color-bg) 90%, transparent)}
 .bubble.user{background:color-mix(in srgb, var(--color-accent-2-200) 92%, transparent);margin-left:auto}
-.bubble p{margin:0;font-size:13.5px;color:var(--color-text);white-space:pre-wrap}
-.bubble.pending p{opacity:.6}
+.msg{margin:0;min-width:0;font-size:13.5px;color:var(--color-text);white-space:pre-wrap;overflow-wrap:anywhere}
+.bubble.pending .msg{animation:yoho-pulse 1.6s ease-in-out infinite}
+@keyframes yoho-pulse{0%,100%{opacity:.45}50%{opacity:.85}}
+@media (prefers-reduced-motion:reduce){.bubble.pending .msg{animation:none;opacity:.6}}
+/* Agent replies rendered from markdown: HTML handles the line breaks, so drop pre-wrap. */
+.msg.md{white-space:normal}
+.msg.md>:first-child{margin-top:0}
+.msg.md>:last-child{margin-bottom:0}
+.msg.md p{margin:0 0 .6em}
+.msg.md ul,.msg.md ol{margin:0 0 .6em;padding-left:1.3em}
+.msg.md li+li{margin-top:.2em}
+.msg.md h1,.msg.md h2,.msg.md h3,.msg.md h4{margin:.4em 0 .3em;font-size:14.5px;line-height:1.3}
+.msg.md code{font-size:12.5px;padding:1px 4px;border-radius:4px;background:color-mix(in srgb, currentColor 10%, transparent)}
+.msg.md pre{margin:0 0 .6em;padding:8px 10px;border-radius:8px;overflow-x:auto;background:color-mix(in srgb, currentColor 8%, transparent)}
+.msg.md pre code{padding:0;background:none}
+.msg.md a{color:inherit;text-decoration:underline}
+.msg.md table{border-collapse:collapse;margin:0 0 .6em;font-size:12.5px}
+.msg.md th,.msg.md td{border:1px solid color-mix(in srgb, currentColor 20%, transparent);padding:3px 6px;text-align:left}
+/* Subway and bus mentions (transit_badges.js); background and text color are set inline per line. */
+.transit-badge{display:inline-block;padding:0 .42em;border-radius:6px;font-weight:700;font-size:.92em;line-height:1.55;white-space:nowrap;vertical-align:baseline}
+.msg.md blockquote{margin:0 0 .6em;padding-left:10px;border-left:3px solid color-mix(in srgb, currentColor 25%, transparent)}
 .app.dark .bubble.agent{background:color-mix(in srgb, var(--color-neutral-800) 90%, transparent)}
 .app.dark .bubble.user{background:color-mix(in srgb, var(--color-neutral-700) 88%, transparent)}
-.app.dark .bubble p{color:var(--color-neutral-100)}
+.app.dark .msg{color:var(--color-neutral-100)}
 .chat-input::placeholder{color:color-mix(in srgb, var(--color-text) 50%, transparent)}
 .app.dark .chat-input{color:var(--color-neutral-100)}
 .app.dark .chat-input::placeholder{color:color-mix(in srgb, var(--color-neutral-100) 55%, transparent)}
@@ -77,13 +112,17 @@ body{margin:0;overflow:hidden}
 </div>
 
 <script>
-const map=L.map('map',{center:[40.7440,-73.9903],zoom:16,zoomControl:false,dragging:false,scrollWheelZoom:false,doubleClickZoom:false,touchZoom:false,boxZoom:false,keyboard:false});
+const map=L.map('map',{center:[40.7440,-73.9903],zoom:16,zoomControl:false,keyboard:false});
 L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',{attribution:'Esri, HERE, Garmin, &copy; OpenStreetMap contributors',maxZoom:19}).addTo(map);
 window.addEventListener('resize',()=>map.invalidateSize());
-map.createPane('tint').style.zIndex=250;  // above tiles (200), below the route (450)
-L.rectangle([[-85,-180],[85,180]],{pane:'tint',interactive:false}).addTo(map);
 // Keep the route clear of the chat thread, which covers the right side of the map.
-const routeMap=new RouteMap(map,{padding:[40,Math.min(660,window.innerWidth*0.55),90,40]});
+// Clicking a pinned search result sends it as the reply to "which one?".
+const routeMap=new RouteMap(map,{padding:[40,Math.min(660,window.innerWidth*0.55),90,40],
+  onPlacePick:place=>{
+    const sent=sendMessage(place.address?`${place.name}, ${place.address}`:place.name);
+    if(sent&&!chatOpen) setChatOpen(true);  // show the thread the pick went to
+    return sent;
+  }});
 
 const sunSVG='<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>';
 const moonSVG='<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>';
@@ -107,7 +146,6 @@ function setChatOpen(open){
   chatOpen=open;
   overlayEl.style.display=open?'flex':'none';
   chatToggleBtn.classList.toggle('icon-btn-active',open);
-  ['dragging','scrollWheelZoom','doubleClickZoom','touchZoom','boxZoom'].forEach(k=>{ open?map[k].disable():map[k].enable(); });
 }
 chatToggleBtn.addEventListener('click',()=>setChatOpen(!chatOpen));
 
@@ -119,13 +157,31 @@ function addBubble(text,fromUser){
   const b=document.createElement('div'); b.className='bubble '+(fromUser?'user':'agent');
   if(!fromUser){
     const av=document.createElement('span'); av.className='roundel';
-    av.style.width='26px'; av.style.height='26px'; av.style.fontSize='12px'; av.style.background='var(--color-accent-600)';
+    av.style.width='26px'; av.style.height='26px'; av.style.fontSize='12px'; av.style.background='var(--color-accent-2-600)';
     av.textContent='Y'; b.appendChild(av);
   }
-  const p=document.createElement('p'); p.textContent=text;
+  const p=document.createElement('div'); p.className='msg'; p.textContent=text;
   b.appendChild(p); row.appendChild(b); thread.appendChild(row);
   thread.scrollTop=thread.scrollHeight;
   return {row,bubble:b,p};
+}
+
+// Agent replies are markdown. Parse client-side and sanitize before inserting, since the model's
+// output can echo text from calendar events or user messages. Falls back to plain text if the
+// libraries didn't load.
+if(window.DOMPurify){
+  DOMPurify.addHook('afterSanitizeAttributes',node=>{
+    if(node.tagName==='A'){ node.setAttribute('target','_blank'); node.setAttribute('rel','noopener noreferrer'); }
+  });
+}
+function setMarkdown(el,text){
+  if(window.marked&&window.DOMPurify){
+    el.innerHTML=DOMPurify.sanitize(marked.parse(text,{gfm:true,breaks:true}),{FORBID_TAGS:['img','style','form','input']});
+    el.classList.add('md');
+  }else{
+    el.textContent=text; el.classList.remove('md');
+  }
+  if(window.yohoDecorateTransit) yohoDecorateTransit(el);
 }
 addBubble("Hi! Ask me how to get anywhere in the city — or how long it'll take from home.",false);
 
@@ -134,25 +190,62 @@ const ERRORS={
   request_in_progress:"Still working on your last message — one moment.",
   message_too_long:"That message is too long — try a shorter one.",
 };
+// Rotating placeholder while the agent works: a random first word, then a new one every
+// couple of seconds, never repeating the one just shown.
+const STATUS_WORDS=['Thinking','Charting','Planning','Scouting','Routing','Mapping','Checking the trains','Plotting','Wayfinding','Surveying'];
+function startStatus(el){
+  let last=-1;
+  const show=()=>{
+    let i; do{ i=Math.floor(Math.random()*STATUS_WORDS.length); }while(i===last);
+    last=i; el.textContent=STATUS_WORDS[i]+'…';
+  };
+  // The thread is aria-live; hide the rotating words so screen readers don't announce each one.
+  el.setAttribute('aria-hidden','true');
+  show();
+  const timer=setInterval(show,2200);
+  return ()=>{ clearInterval(timer); el.removeAttribute('aria-hidden'); };
+}
+
 let sending=false;
-async function send(e){
+// Send `text` as the user's message. Returns false, doing nothing, when it's empty
+// or a reply is still pending (a pin click then stays clickable).
+function sendMessage(text){
+  const val=String(text||'').trim();
+  if(!val||sending) return false;
+  deliver(val);
+  return true;
+}
+function send(e){
   e.preventDefault();
-  const val=input.value.trim(); if(!val||sending) return;
+  if(sendMessage(input.value)) input.value='';
+}
+async function deliver(val){
   sending=true; sendBtn.disabled=true;
-  addBubble(val,true); input.value='';
-  const pending=addBubble('…',false); pending.bubble.classList.add('pending');
+  addBubble(val,true);
+  const pending=addBubble('',false); pending.bubble.classList.add('pending');
+  const stopStatus=startStatus(pending.p);
   try{
-    const data=await yohoApi('/api/chat',{method:'POST',body:{message:val}});
-    pending.p.textContent=data.reply||"Sorry, I didn't get a reply for that.";
-    if(data.route) routeMap.show(data.route);
+    const data=await yohoApi('/api/chat',{method:'POST',body:{message:val,location:yohoSavedLocation()}});
+    stopStatus();
+    if(data.reply) setMarkdown(pending.p,data.reply);
+    else pending.p.textContent="Sorry, I didn't get a reply for that.";
+    // A map drawing problem mustn't replace a good reply with an error message.
+    try{
+      if(data.route) routeMap.show(data.route);
+      else if(data.places) routeMap.showPlaces(data.places);
+      if(data.stations) routeMap.showStations(data.stations,{keepView:!!data.route});
+    }catch(mapErr){ console.error('drawing on the map failed',mapErr); }
   }catch(err){
+    stopStatus();
     pending.p.textContent=ERRORS[err.message]||"Something went wrong reaching Yoho. Try again.";
   }finally{
-    pending.bubble.classList.remove('pending');
+    stopStatus(); pending.bubble.classList.remove('pending');
     sending=false; sendBtn.disabled=false; input.focus();
     thread.scrollTop=thread.scrollHeight;
   }
 }
 document.getElementById('dock').addEventListener('submit',send);
+// Ask for location on load so "how do I get to X?" can start from where the user is.
+yohoTrackLocation();
 </script>
 {% endblock %}

@@ -24,8 +24,11 @@ their plaintext.
 from __future__ import annotations
 
 import copy
+import os
+import pickle
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Protocol
 
 
@@ -193,3 +196,44 @@ def _merge(target: dict, fields: dict[str, Any]) -> None:
             _merge(target[key], value)
         else:
             target[key] = copy.deepcopy(value)
+
+
+class FileStore(MemoryStore):
+    """MemoryStore saved to a local pickle after every write, so a single-process
+    dev server keeps its users (and their session cookies stay valid) across
+    restarts and debug-reloader reloads. Dev only: one process, trusted file."""
+
+    _WRITES = ("upsert_user", "update_user", "delete_user", "add_usage", "replace_calendar_events",
+               "set_conversation", "save_watch_channel", "delete_watch_channel", "replace_due_checks",
+               "update_due_check")
+    _TABLES = ("_users", "_usage", "_events", "_conversations", "_channels", "_due_checks")
+
+    def __init__(self, path: str | os.PathLike) -> None:
+        super().__init__()
+        self._path = Path(path)
+        if self._path.exists():
+            with self._path.open("rb") as f:
+                saved = pickle.load(f)
+            for name in self._TABLES:
+                setattr(self, name, saved.get(name, {}))
+
+    def _save(self) -> None:
+        with self._lock:
+            snapshot = pickle.dumps({name: getattr(self, name) for name in self._TABLES})
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
+        tmp.write_bytes(snapshot)
+        os.replace(tmp, self._path)
+
+
+def _saving(name: str):
+    def method(self, *args, **kwargs):
+        result = getattr(MemoryStore, name)(self, *args, **kwargs)
+        self._save()
+        return result
+    method.__name__ = name
+    return method
+
+
+for _name in FileStore._WRITES:
+    setattr(FileStore, _name, _saving(_name))

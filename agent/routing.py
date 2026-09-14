@@ -9,7 +9,10 @@ from __future__ import annotations
 import csv
 import io
 import os
+import re
+import threading
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -17,7 +20,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import requests
 
-from geocoding import NominatimClient
+from geocoding import geocode
 from graph import Graph
 from graph.combined_loader import build_combined_graph
 from graph.service_states import state_at
@@ -56,16 +59,29 @@ _boarding_headway_sec: dict[tuple[str, str], dict[str, float]] = {}
 _headways: dict[str, dict[str, float]] = {}
 _stop_names: dict[str, str] | None = None
 
+# Startup warm-up (agent.tools.warm_up) builds these on a background thread while
+# requests may already be asking for them: the locks make a request wait for that
+# build instead of starting a second one.
+_graph_lock = threading.Lock()
+_stop_names_lock = threading.Lock()
+
+
 def _get_graph() -> Graph:
     global _graph
-    if _graph is None:
-        _graph = build_combined_graph(DATA_DIR, access_sec=_access_sec,
-                                      boarding_headway_sec=_boarding_headway_sec,
-                                      headways=_headways)
+    with _graph_lock:
+        if _graph is None:
+            _graph = build_combined_graph(DATA_DIR, access_sec=_access_sec,
+                                          boarding_headway_sec=_boarding_headway_sec,
+                                          headways=_headways)
     return _graph
 
 
 def _get_stop_names() -> dict[str, str]:
+    with _stop_names_lock:
+        return _load_stop_names()
+
+
+def _load_stop_names() -> dict[str, str]:
     global _stop_names
     if _stop_names is None:
         names: dict[str, str] = {}
@@ -127,8 +143,69 @@ class Route:
         self.walk_out_sec = walk_out_sec
 
 
+MODES = ("subway", "bus")
+_MODE_WORDS = {"subway": "subway", "subways": "subway", "train": "subway", "trains": "subway", "metro": "subway",
+               "bus": "bus", "buses": "bus", "busses": "bus"}
+_LINE_NOISE = re.compile(r"\b(the|train|trains|line|lines|bus|buses|route)\b", re.I)
+
+
+@dataclass(frozen=True)
+class Avoid:
+    """Modes and lines a trip must not use."""
+    modes: frozenset = field(default_factory=frozenset)
+    lines: frozenset = field(default_factory=frozenset)
+
+    def __bool__(self) -> bool:
+        return bool(self.modes or self.lines)
+
+    def allows(self, node) -> bool:
+        if node.mode in self.modes:
+            return False
+        vehicle = node.vehicle.upper()
+        return not (vehicle in self.lines or
+                    (node.mode == "subway" and vehicle.endswith("X") and vehicle[:-1] in self.lines))
+
+    def describe(self) -> dict:
+        return {"modes": sorted(self.modes), "lines": sorted(self.lines)}
+
+
+def parse_avoid(modes: list[str] | None = None, lines: list[str] | None = None) -> Avoid:
+    """Avoid from what the model passes: modes like "bus"/"subways", lines like
+    "L", "the 6 train", "B38". Raises ValueError with a message it can act on."""
+    mode_set = set()
+    for m in modes or []:
+        key = _MODE_WORDS.get(str(m).strip().lower())
+        if key is None:
+            raise ValueError(f"avoid_modes must be 'subway' or 'bus', got {m!r}")
+        mode_set.add(key)
+    if mode_set == set(MODES):
+        raise ValueError("can't avoid both subway and bus: there'd be nothing left to ride")
+    line_set = set()
+    for raw in lines or []:
+        line = _LINE_NOISE.sub(" ", str(raw)).strip().upper().replace(" ", "")
+        if not line:
+            raise ValueError(f"couldn't read a line name from {raw!r}")
+        line_set.add(line)
+    unknown = sorted(line_set - known_lines())
+    if unknown:
+        raise ValueError(f"unknown line(s) {', '.join(unknown)}; use names like 'L', '6', 'B38', 'M15'")
+    return Avoid(frozenset(mode_set), frozenset(line_set))
+
+
+_known_lines: set[str] | None = None
+
+
+def known_lines() -> set[str]:
+    """Every line/route name in the graph, upper-case (subway and bus)."""
+    global _known_lines
+    if _known_lines is None:
+        graph = _get_graph()
+        _known_lines = {graph.get_node(n).vehicle.upper() for n in graph}
+    return _known_lines
+
+
 def _route(graph: Graph, start: tuple[float, float], end: tuple[float, float], state: str,
-           waits: "Waits | None" = None) -> Route:
+           waits: "Waits | None" = None, avoid: Avoid | None = None) -> Route:
     """Cheapest trip from `start` to `end`, walks included.
 
     It may board at any stop near `start` (_access_walks), paying the walk
@@ -137,14 +214,24 @@ def _route(graph: Graph, start: tuple[float, float], end: tuple[float, float], s
     rather than a particular one also matters once transfers carry real waits:
     otherwise a route could end with a transfer onto one particular platform
     -- even a line that isn't running -- after already arriving. The whole
-    trip is priced in `state`, its departure state."""
+    trip is priced in `state`, its departure state. `avoid` removes modes and
+    lines entirely, including as the stop boarded or left at."""
     walk_in, walk_out = _access_walks(graph, start), _access_walks(graph, end)
+    if avoid:
+        walk_in = {n: w for n, w in walk_in.items() if avoid.allows(graph.get_node(n))}
+        walk_out = {n: w for n, w in walk_out.items() if avoid.allows(graph.get_node(n))}
+        if not walk_in or not walk_out:
+            where = "the start" if not walk_in else "the destination"
+            raise ValueError(f"no stop near {where} is left after avoiding {avoid.describe()}")
     start_costs = {n: w + _first_wait(n, state, waits) for n, w in walk_in.items()}
     result = graph.shortest_path(min(start_costs, key=start_costs.get),
                                  min(walk_out, key=walk_out.get), service_period=state,
-                                 start_costs=start_costs, end_costs=walk_out)
+                                 start_costs=start_costs, end_costs=walk_out,
+                                 ignore_modes=set(avoid.modes) if avoid else None,
+                                 ignore_routes=set(avoid.lines) if avoid else None)
     if result is None:
-        raise ValueError(f"no path found between {start!r} and {end!r}")
+        suffix = f" while avoiding {avoid.describe()}" if avoid else ""
+        raise ValueError(f"no path found between {start!r} and {end!r}{suffix}")
     node_ids, total = result
     first = node_ids[0]
     return Route(node_ids, total, walk_in[first], _first_wait(first, state, waits),
@@ -196,16 +283,13 @@ def _fetch_waits() -> Waits | None:
 
 
 def geocode_address(address: str) -> tuple[float, float]:
-    """(lat, lon) for an address via Nominatim; raises ValueError if not found."""
-    with NominatimClient(user_agent=GEOCODER_USER_AGENT) as client:
-        result = client.geocode(address)
-    if result is None:
-        raise ValueError(f"could not geocode address: {address!r}")
-    return result
+    """(lat, lon) of the best NYC match for an address or place name (geocoding/search.py);
+    raises ValueError if nothing matches."""
+    return geocode(address)
 
 
 def schedule_route(start: tuple[float, float], end: tuple[float, float], departure_time: int | None = None,
-                   waits: Waits | None = None) -> dict:
+                   waits: Waits | None = None, avoid: Avoid | None = None) -> dict:
     """Fastest route on the schedule for the departure's service state. With
     `waits`, the first-train wait is priced in and reported (first_wait_sec).
 
@@ -213,7 +297,7 @@ def schedule_route(start: tuple[float, float], end: tuple[float, float], departu
     (plus "first_wait_sec" with waits)."""
     graph = _get_graph()
     state = _state_at(time.time() if departure_time is None else departure_time)
-    route = _route(graph, start, end, state, waits)
+    route = _route(graph, start, end, state, waits, avoid)
     out = {"steps": _describe_path(graph, route.node_ids), "total_time_sec": route.total_sec,
            "walk_in_sec": round(route.walk_in_sec), "walk_out_sec": round(route.walk_out_sec),
            "service_state": state}

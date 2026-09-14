@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import io
 import math
+import logging
 import os
+import threading
 import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -37,7 +39,7 @@ import torch
 
 from strands import tool
 
-from agent.routing import (SNAPSHOT_SERVICE_URL, SNAPSHOT_TIMEOUT_SEC, TZ, BUS_WAIT_HEADWAY_FRACTION, Route, Waits,
+from agent.routing import (Avoid, SNAPSHOT_SERVICE_URL, SNAPSHOT_TIMEOUT_SEC, TZ, BUS_WAIT_HEADWAY_FRACTION, Route, Waits,
                            _access_sec, _boarding_headway_sec, _describe_path, _fetch_waits, _first_wait,
                            _get_graph, _get_stop_names, _route, _state_at, geocode_address, schedule_route)
 from graph import Graph
@@ -90,20 +92,18 @@ def get_current_time() -> dict:
 
 @tool
 def get_position(address: str) -> tuple[float, float]:
-    """Geocode a street address or place name to (latitude, longitude).
+    """(latitude, longitude) of the best New York City match for an address or place name.
+    If it errors, or the name could be several places, use search_places instead.
 
     Args:
-        address: A street address or place name, e.g. "365 5th Avenue, New York, NY".
-
-    Returns:
-        (latitude, longitude) for the given address.
+        address: A street address or place name, e.g. "365 5th Avenue" or "Jesse Owens School".
     """
     return geocode_address(address)
 
 
 @tool
 def get_path(start: tuple[float, float], end: tuple[float, float],
-             departure_time: int | None = None) -> dict:
+             departure_time: int | None = None, avoid: Avoid | None = None) -> dict:
     """Find the fastest route between two coordinates on the combined
     subway+bus graph, using the average-time-weighted schedule for the day
     and time of departure (no live updates -- see get_predicted_path for that).
@@ -123,7 +123,7 @@ def get_path(start: tuple[float, float], end: tuple[float, float],
          "walk_in_sec", "walk_out_sec": those two walks,
          "service_state": the schedule state priced, e.g. "Weekday:16-22"}
     """
-    return schedule_route(start, end, departure_time)
+    return schedule_route(start, end, departure_time, avoid=avoid)
 
 
 def _fetch_snapshot() -> tuple[GraphSnapshot, bool]:
@@ -154,11 +154,31 @@ class ModelCosts:
         self.real_steps = real_steps
 
 
+_graph_model_lock = threading.Lock()
+log = logging.getLogger(__name__)
+
+
+def warm_up() -> None:
+    """Load the graph model -- which builds the transit graph it's checked
+    against -- and the stop names, so the first chat request doesn't pay for
+    them (~15s). Safe to run on a background thread while requests arrive."""
+    started = time.time()
+    model = _get_graph_model()
+    _get_stop_names()
+    log.info("warm-up done in %.1fs; graph model %s", time.time() - started,
+             "loaded" if model is not None else f"unavailable ({_model_error})")
+
+
 def _get_graph_model() -> GWNetForecaster | None:
     """The checkpoint at GRAPH_MODEL_PATH, loaded once. None, with the reason in
     _model_error, when it's missing or doesn't fit the graph: its learned
     adjacency and per-transfer embeddings belong to specific edges, so a GTFS
     change that adds, drops or renames subway edges needs a retrained model."""
+    with _graph_model_lock:
+        return _load_graph_model()
+
+
+def _load_graph_model() -> GWNetForecaster | None:
     global _graph_model, _model_error
     if _graph_model is None:
         try:
@@ -333,6 +353,7 @@ def get_predicted_path(
     event_time: int,
     start_location: tuple[float, float],
     end_location: tuple[float, float],
+    avoid: Avoid | None = None,
 ) -> dict:
     """Re-predict a trip under live MTA conditions to say when to leave.
 
@@ -367,8 +388,8 @@ def get_predicted_path(
     model = _model_costs(now)
     weighted = _weighted_graph(model, state)
 
-    planned = _route(graph, start_location, end_location, state)
-    predicted = _route(weighted, start_location, end_location, state, waits)
+    planned = _route(graph, start_location, end_location, state, avoid=avoid)
+    predicted = _route(weighted, start_location, end_location, state, waits, avoid)
     predicted_time = predicted.total_sec
     snapshot_ts = int(snapshot.at.timestamp())
 
@@ -414,6 +435,7 @@ def compare_schedule_vs_live(
     start: tuple[float, float],
     end: tuple[float, float],
     arrival_deadline: int | None = None,
+    avoid: Avoid | None = None,
 ) -> dict:
     """Compare schedule-based routing against live delays to show real impact.
 
@@ -439,7 +461,7 @@ def compare_schedule_vs_live(
         }
     """
     now = int(time.time())
-    schedule_result = get_path(start, end, departure_time=now)
+    schedule_result = get_path(start, end, departure_time=now, avoid=avoid)
     schedule_time = schedule_result["total_time_sec"]
 
     if arrival_deadline is None:
@@ -450,6 +472,7 @@ def compare_schedule_vs_live(
         event_time=arrival_deadline,
         start_location=start,
         end_location=end,
+        avoid=avoid,
     )
 
     return {

@@ -44,3 +44,22 @@ class NominatimClient:
         if not results:
             return None
         return float(results[0]["lat"]), float(results[0]["lon"])
+
+    def search(self, query: str, limit: int = 5,
+               bbox: tuple[float, float, float, float] | None = None) -> list[dict]:
+        """Up to `limit` places matching `query`, restricted to `bbox`
+        (west, south, east, north) when given: [{"name", "address", "lat", "lon", "kind"}]."""
+        params = {"q": query, "format": "jsonv2", "limit": limit}
+        if bbox:
+            west, south, east, north = bbox
+            params.update(viewbox=f"{west},{north},{east},{south}", bounded=1)
+        response = self._session.get(NOMINATIM_URL, params=params, timeout=self._timeout)
+        response.raise_for_status()
+        places = []
+        for r in response.json():
+            parts = [p.strip() for p in r.get("display_name", "").split(",")]
+            name = r.get("name") or (parts[0] if parts else query)
+            rest = [p for p in parts if p and p != name]
+            places.append({"name": name, "address": ", ".join(rest[:4]), "lat": float(r["lat"]),
+                           "lon": float(r["lon"]), "kind": r.get("type") or r.get("category") or ""})
+        return places

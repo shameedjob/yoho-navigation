@@ -98,7 +98,7 @@ def main() -> int:
         oauth = SimpleNamespace(credentials=lambda refresh_token, scopes: SimpleNamespace(refresh_token=refresh_token))
     notifier = SnsNotifier(sns_topic, os.environ.get("AWS_REGION")) if sns_topic else LogNotifier()
     app = create_app(settings, store=store, oauth=oauth, notifier=notifier, run_background=lambda fn: fn(),
-                     agent_factory=lambda *a: None)
+                     agent_factory=lambda *a, **k: None)
     svc = app.extensions["yoho"]
     cipher: FieldCipher = svc.cipher
     route, geocode = (fake_route, lambda a: (40.7347, -73.9900)) if args.fake_route else (schedule_router, transit_geocode)

@@ -52,21 +52,53 @@ def local_label(ts: int) -> str:
     return datetime.fromtimestamp(ts, NYC).strftime("%a %b %-d, %-I:%M %p")
 
 
-def parse_local_time(value: str, now: int) -> int:
-    """Unix time for a New York local "HH:MM" (the next time it occurs) or
-    "YYYY-MM-DD HH:MM". The model states clock times; it can't do epoch math."""
-    value = str(value).strip()
-    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M"):
+LOCAL_TIME_FORMATS = ('"HH:MM", "2pm", "Monday 14:00", "tomorrow 9:30" or "YYYY-MM-DD HH:MM" '
+                      '(New York time)')
+_WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+
+
+def _parse_clock(text: str) -> tuple[int, int]:
+    text = text.strip().lower().replace(" ", "").replace(".", "")
+    for fmt in ("%H:%M", "%I:%M%p", "%I%p", "%H"):
         try:
-            return int(datetime.strptime(value, fmt).replace(tzinfo=NYC).timestamp())
+            clock = datetime.strptime(text, fmt)
+            return clock.hour, clock.minute
         except ValueError:
             pass
+    raise ValueError(text)
+
+
+def parse_local_time(value: str, now: int) -> int:
+    """Unix time for a New York local time the model states in words, because it
+    can't do epoch math: "14:00" / "2pm" (the next time it occurs), "Monday 14:00"
+    (the next Monday; today if that time hasn't passed), "today 9:30",
+    "tomorrow 9:30", or "YYYY-MM-DD HH:MM"."""
+    raw = str(value).strip()
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M"):
+        try:
+            return int(datetime.strptime(raw, fmt).replace(tzinfo=NYC).timestamp())
+        except ValueError:
+            pass
+    words = raw.lower().replace(",", " ").replace(" at ", " ").split()
+    current = datetime.fromtimestamp(now, NYC)
+    day_word = next((w for w in words if w in ("today", "tonight", "tomorrow")
+                     or any(d.startswith(w) and len(w) >= 3 for d in _WEEKDAYS)), None)
+    clock_text = " ".join(w for w in words if w != day_word)
     try:
-        clock = datetime.strptime(value, "%H:%M")
+        hour, minute = _parse_clock(clock_text)
     except ValueError:
-        raise ValueError(f'arrival_time must be "HH:MM" or "YYYY-MM-DD HH:MM" (New York time), got {value!r}')
-    target = datetime.fromtimestamp(now, NYC).replace(hour=clock.hour, minute=clock.minute, second=0, microsecond=0)
-    if target.timestamp() < now:
+        raise ValueError(f"time must be {LOCAL_TIME_FORMATS}, got {raw!r}")
+    target = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if day_word == "tomorrow":
+        target += timedelta(days=1)
+    elif day_word in ("today", "tonight"):
+        pass
+    elif day_word is not None:
+        weekday = next(i for i, d in enumerate(_WEEKDAYS) if d.startswith(day_word))
+        target += timedelta(days=(weekday - current.weekday()) % 7)
+        if target.timestamp() < now:
+            target += timedelta(days=7)
+    elif target.timestamp() < now:
         target += timedelta(days=1)
     return int(target.timestamp())
 
@@ -123,29 +155,37 @@ def resolve_start(store: UserStore, cipher: FieldCipher, uid: str, now: int,
 
 
 def plan_leave_by(store: UserStore, cipher: FieldCipher, uid: str, destination: Coords, arrive: int, now: int,
-                  *, geocode: Geocoder, route: Router) -> dict:
-    """When to leave to reach `destination` by `arrive`, from resolve_start.
+                  *, geocode: Geocoder, route: Router, start: Coords | None = None,
+                  located_at: int | None = None) -> dict:
+    """When to leave to reach `destination` by `arrive`: from `start` when the
+    user gave one, else from resolve_start (current event or home).
 
     Returns {"leave_by_ts", "leave_by", "arrive_by", "slack_min", "steps",
     "total_time_sec", "walk_in_sec", "walk_out_sec", "live", "alerts",
     "start_source", ...}, or an {"error", "message"} dict."""
-    start, info = resolve_start(store, cipher, uid, now, geocode)
-    if start is None:
-        return info
-    trip = route(start, tuple(destination), arrive)
+    if start is not None:
+        info: dict = {"start_source": "given"}
+    else:
+        # Where the rider is at `located_at` (e.g. their expected departure), else now.
+        start, info = resolve_start(store, cipher, uid, located_at or now, geocode)
+        if start is None:
+            return info
+    trip = route(tuple(start), tuple(destination), arrive)
     leave_ts = round(arrive - trip["total_time_sec"])
+    # start_point is for drawing the walk from the start; callers must not hand it
+    # to the model or browser when start_source is "home".
     return {"leave_by_ts": leave_ts, "leave_by": local_label(leave_ts), "arrive_by": local_label(arrive),
-            "slack_min": round((leave_ts - now) / 60), **trip, **info}
+            "slack_min": round((leave_ts - now) / 60), **trip, **info, "start_point": tuple(start)}
 
 
-def transit_router(start: Coords, end: Coords, arrive: int) -> dict:
+def transit_router(start: Coords, end: Coords, arrive: int, avoid=None) -> dict:
     """The agent's router: live MTA prediction (graph model over the snapshot
     service's window), falling back to the schedule when that's down. Loads torch."""
     from agent.tools import get_path, get_predicted_path
-    schedule = get_path(start=start, end=end)
+    schedule = get_path(start=start, end=end, avoid=avoid)
     try:
         live = get_predicted_path(base_time=int(schedule["total_time_sec"]), event_time=arrive,
-                                  start_location=start, end_location=end)
+                                  start_location=start, end_location=end, avoid=avoid)
     except Exception:  # snapshot service down or cold: the schedule is still an answer
         live = None
     if live is None:
@@ -158,13 +198,13 @@ def transit_router(start: Coords, end: Coords, arrive: int) -> dict:
             "live": True, "delay_vs_schedule_sec": live["delay_sec"], "alerts": live["alerts_on_route"]}
 
 
-def schedule_router(start: Coords, end: Coords, arrive: int) -> dict:
+def schedule_router(start: Coords, end: Coords, arrive: int, avoid=None) -> dict:
     """The scheduler's router, without torch: the schedule for the departure's
     service state, plus the live wait for the first train when the snapshot
     service is up (live_waits)."""
     from agent.routing import _fetch_waits, schedule_route
     waits = _fetch_waits()
-    trip = schedule_route(start, end, waits=waits)
+    trip = schedule_route(start, end, waits=waits, avoid=avoid)
     return {"steps": trip["steps"], "total_time_sec": trip["total_time_sec"],
             "walk_in_sec": trip["walk_in_sec"], "walk_out_sec": trip["walk_out_sec"],
             "live": False, "live_waits": waits is not None, "alerts": []}

@@ -4,10 +4,17 @@
     scheduler, every minute -> run_due_checks -> plan_leave_by -> email (SNS)
     scheduler, hourly -> renew_watches
 
-A due check is one row per upcoming timed event with a location: check it at
-event start minus YOHO_ALERT_LEAD_MINUTES. Checks live in the store, not in a
-process, so any number of web workers can write them, one scheduler reads them,
-and a restart loses nothing.
+A due check is one row per upcoming timed event with a location. The email goes
+out YOHO_ALERT_LEAD_MINUTES before the rider has to *leave* -- which depends on
+the trip, unknown when the calendar syncs. So each check runs in two phases:
+
+  plan   PLAN_AHEAD_SEC before the event: route the trip to learn the leave
+         time, then move the check to (leave time - lead). If that moment has
+         already passed (a late-added event, a very long trip), send right away.
+  send   at (leave time - lead): route again with fresh data and email it.
+
+Checks live in the store, not in a process, so any number of web workers can
+write them, one scheduler reads them, and a restart loses nothing.
 
 Alerts are planned in code (accounts/trips.py), not by the chat agent: no
 tokens spent, and the directions in the email can't be garbled by the model.
@@ -23,7 +30,7 @@ import secrets
 import uuid
 
 from accounts.calendar_sync import user_credentials
-from accounts.trips import Geocoder, Router, event_location, local_label, parse_event_time, plan_leave_by
+from accounts.trips import Geocoder, Router, event_location, local_label, parse_event_time, plan_leave_by, resolve_start
 from agent.directions import format_directions
 from integrations.google import CalendarAccessRevoked
 from integrations.google.calendar import start_watch, stop_watch
@@ -32,6 +39,8 @@ from storage import FieldCipher, UserStore
 log = logging.getLogger(__name__)
 
 ALERT_LEAD_SEC = int(os.environ.get("YOHO_ALERT_LEAD_MINUTES", "60")) * 60
+# The plan phase runs this long before the event: longer than any trip plus the lead.
+PLAN_AHEAD_SEC = 4 * 3600
 MAX_ATTEMPTS = 3
 RENEW_WITHIN_SEC = 24 * 3600
 WEBHOOK_PATH = "/webhooks/google-calendar"
@@ -44,9 +53,10 @@ def due_check_id(uid: str, event_id: str) -> str:
 
 
 def refresh_due_checks(store: UserStore, uid: str, now: int, lead_sec: int = ALERT_LEAD_SEC) -> int:
-    """Rebuild the user's due checks from their stored events. A check already
-    sent for the same event start stays sent, so a re-sync doesn't re-alert; a
-    moved event gets a fresh check. Returns how many are pending."""
+    """Rebuild the user's due checks from their stored events. A check for the
+    same event start is kept as it is -- sent stays sent (a re-sync doesn't
+    re-alert), a planned send time stays planned; a new or moved event gets a
+    fresh check in the plan phase. Returns how many are pending."""
     existing = {c["id"]: c for c in store.list_due_checks(uid)}
     checks = []
     for event in store.list_calendar_events(uid):
@@ -55,48 +65,78 @@ def refresh_due_checks(store: UserStore, uid: str, now: int, lead_sec: int = ALE
             continue  # nothing to alert: all-day, started, or nowhere to route to
         cid = due_check_id(uid, event["id"])
         prev = existing.get(cid)
-        if prev and prev.get("event_start") == event["start"] and prev.get("status") != "pending":
+        if prev and prev.get("event_start") == event["start"]:
             checks.append(prev)
             continue
         checks.append({"id": cid, "uid": uid, "event_id": event["id"], "event_start": event["start"],
-                       "check_at": int(start.timestamp()) - lead_sec, "status": "pending", "attempts": 0})
+                       "check_at": int(start.timestamp()) - PLAN_AHEAD_SEC, "phase": "plan",
+                       "status": "pending", "attempts": 0})
     store.replace_due_checks(uid, checks)
     return sum(c["status"] == "pending" for c in checks)
 
 
-def compose_alert(plan: dict, summary: str | None) -> tuple[str, str]:
-    """(subject, body) for one alert email."""
+def _clock(ts: int) -> str:
+    """e.g. "8:14 AM" (the email is about one day's trip)."""
+    return local_label(ts).split(", ")[-1]
+
+
+def compose_alert(plan: dict, summary: str | None, location: str | None, now: int) -> tuple[str, str]:
+    """(subject, body) for one alert email:
+
+        Subject: YoHo Alert: Dentist
+        Your trip to Barclays Center is on schedule. To make sure you get there on
+        time, be sure to follow this route from home at 8:14 AM:
+        <directions>
+        ETA: 9:00 AM
+    """
     what = summary or "your event"
-    if plan["slack_min"] < 0:
-        subject = f"Running late for {what}: leave now"
+    where = location or what
+    start = (f"your current event ({plan['event_summary']})" if plan.get("start_source") == "event"
+             and plan.get("event_summary") else "your current event" if plan.get("start_source") == "event"
+             else "home")
+    directions = format_directions(plan["steps"], plan["total_time_sec"], plan.get("walk_in_sec"),
+                                   plan.get("walk_out_sec"))
+    if plan["slack_min"] >= 0:
+        intro = (f"Your trip to {where} is on schedule. To make sure you get there on time, "
+                 f"be sure to follow this route from {start} at {_clock(plan['leave_by_ts'])}:")
+        eta = plan["leave_by_ts"] + round(plan["total_time_sec"])
     else:
-        subject = f"Leave by {plan['leave_by'].split(', ')[-1]} for {what}"
-    start = ("your current event" + (f" ({plan['event_summary']})" if plan.get("event_summary") else "")
-             if plan.get("start_source") == "event" else "home")
-    lines = [
-        f"{what} starts {plan['arrive_by']}.",
-        f"Leave by {plan['leave_by']} ({plan['slack_min']} min from now)" if plan["slack_min"] >= 0
-        else f"You'd need to have left {-plan['slack_min']} min ago -- leave as soon as you can.",
-        f"Starting from {start}.",
-        "",
-        format_directions(plan["steps"], plan["total_time_sec"], plan.get("walk_in_sec"), plan.get("walk_out_sec")),
-        "",
-        "Times use live MTA predictions." if plan.get("live")
-        else "Times use the MTA schedule with the live wait for your first train." if plan.get("live_waits")
-        else "Times use the MTA schedule (live data unavailable).",
-    ]
+        intro = (f"Your trip to {where} is running behind: you'd have needed to leave at "
+                 f"{_clock(plan['leave_by_ts'])}. Leave now and follow this route from {start}:")
+        eta = now + round(plan["total_time_sec"])
+    lines = [intro, "", directions, "", f"ETA: {_clock(eta)}"]
     if plan.get("alerts"):
-        lines.append("Service alerts on your route: " + ", ".join(a["stop_name"] for a in plan["alerts"]))
+        lines += ["", "Service alerts on your route: " + ", ".join(a["stop_name"] for a in plan["alerts"])]
     if plan.get("start_note"):
-        lines.append(f"Note: {plan['start_note']}.")
-    return subject, "\n".join(lines)
+        lines += ["", f"Note: {plan['start_note']}."]
+    return f"YoHo Alert: {what}", "\n".join(lines)
+
+
+def _plan_from_departure(store, cipher, uid, destination, arrive: int, now: int, *, geocode, route) -> dict:
+    """plan_leave_by with the trip starting where the rider will be when they
+    *leave*, not where they are when the check runs: at 5:30 they may still be at
+    a museum they'll have left by a 7:20 departure. Routed from now's location
+    first, then from the location at that leave time; if the two disagree (a
+    start near the hour-after-an-event cutoff) the earlier leave time wins."""
+    first = plan_leave_by(store, cipher, uid, destination, arrive, now, geocode=geocode, route=route)
+    if "error" in first:
+        raise ValueError(first["message"])
+    start_then, info = resolve_start(store, cipher, uid, max(now, first["leave_by_ts"]), geocode)
+    if start_then is None or tuple(start_then) == tuple(first["start_point"]):
+        return first  # same place either way: no second route
+    second = plan_leave_by(store, cipher, uid, destination, arrive, now, geocode=geocode, route=route,
+                           start=tuple(start_then))
+    second.update(info)  # report "home"/"event" rather than "given"
+    return min(first, second, key=lambda p: p["leave_by_ts"])
 
 
 def run_due_checks(store: UserStore, cipher: FieldCipher, notifier, now: int,
                    *, geocode: Geocoder, route: Router) -> list[dict]:
-    """Send every pending check that's due. Returns one {"id", "status", ...}
-    per check handled. A failure stays pending and is retried next run, up to
-    MAX_ATTEMPTS; a check whose event has already started expires unsent."""
+    """Run every pending check that's due, in its phase (see the module doc).
+    Returns one {"id", "status", ...} per check handled: "planned" (moved to its
+    send time, with "send_at"), "sent", "expired" or a failure. A failure stays
+    pending and is retried next run, up to MAX_ATTEMPTS; a check whose event has
+    already started expires unsent."""
     results = []
     for check in store.due_checks_before(now):
         if check.get("status") != "pending":
@@ -113,11 +153,15 @@ def run_due_checks(store: UserStore, cipher: FieldCipher, notifier, now: int,
             destination = geocode(address) if address else None
             if not destination:
                 raise ValueError(f"couldn't geocode the event location {address!r}")
-            plan = plan_leave_by(store, cipher, uid, tuple(destination), int(start.timestamp()), now,
-                                 geocode=geocode, route=route)
-            if "error" in plan:
-                raise ValueError(plan["message"])
-            subject, body = compose_alert(plan, event.get("summary"))
+            plan = _plan_from_departure(store, cipher, uid, tuple(destination), int(start.timestamp()), now,
+                                        geocode=geocode, route=route)
+            send_at = plan["leave_by_ts"] - ALERT_LEAD_SEC
+            if check.get("phase", "plan") == "plan" and send_at > now:
+                store.update_due_check(cid, {"phase": "send", "check_at": send_at, "attempts": 0,
+                                             "planned_leave_by": plan["leave_by"]})
+                results.append({"id": cid, "status": "planned", "send_at": send_at, "leave_by": plan["leave_by"]})
+                continue
+            subject, body = compose_alert(plan, event.get("summary"), address, now)
             message_id = notifier.send(uid, subject, body)
         except Exception as exc:
             attempts = check.get("attempts", 0) + 1

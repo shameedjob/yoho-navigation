@@ -5,17 +5,21 @@
   GOOGLE_CLIENT_SECRET          (required)
   GOOGLE_REDIRECT_URI           default http://localhost:5000/auth/google/callback
   YOHO_DATA_KEYS                field-encryption keys, see storage/crypto.py (required)
-  YOHO_STORE                    "firestore" (default) or "memory" (dev/tests; lost on restart)
+  YOHO_STORE                    "firestore" (default), "file" (dev; one process, kept across restarts)
+                                or "memory" (tests; lost on restart)
+  YOHO_STORE_PATH               file store location, default data/dev_store.pkl
   FIREBASE_CREDENTIALS          service-account JSON path; unset = Application Default Credentials
   FIREBASE_PROJECT_ID           optional
   YOHO_MONTHLY_TOKEN_LIMIT      default per-user monthly tokens, default 200000
-  YOHO_AGENT_MODEL              Strands model id; unset = Strands' default
+  YOHO_AGENT_MODEL              Amazon Bedrock model or inference-profile id (region: AWS_REGION);
+                                unset = local Ollama gemma4:e2b
   YOHO_DEV                      "1" allows http:// OAuth redirects and non-Secure cookies
   YOHO_WEBHOOK_BASE_URL         public HTTPS origin Google can reach (e.g. an ngrok URL);
                                 unset = no calendar push notifications
   YOHO_SNS_TOPIC_ARN            SNS topic for alert emails; unset = alerts are only logged
   AWS_REGION                    region of the topic; AWS keys come from boto3's usual chain
   YOHO_ALERT_LEAD_MINUTES       alert this long before an event starts, default 60 (accounts/alerts.py)
+  YOHO_WARMUP                   "0" skips loading the graph model and transit graph at startup (default on)
 """
 
 from __future__ import annotations
@@ -32,6 +36,7 @@ class Settings:
     google_redirect_uri: str
     data_keys: str
     store: str = "firestore"
+    store_path: str = "data/dev_store.pkl"
     firebase_credentials: str | None = None
     firebase_project_id: str | None = None
     monthly_token_limit: int = 200_000
@@ -39,6 +44,8 @@ class Settings:
     webhook_base_url: str | None = None
     sns_topic_arn: str | None = None
     aws_region: str | None = None
+    agent_model: str | None = None
+    warmup: bool = False  # from_env turns it on; tests and scripts build Settings without it
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -53,6 +60,7 @@ class Settings:
             google_redirect_uri=os.environ.get("GOOGLE_REDIRECT_URI", "http://localhost:5000/auth/google/callback"),
             data_keys=os.environ["YOHO_DATA_KEYS"],
             store=os.environ.get("YOHO_STORE", "firestore"),
+            store_path=os.environ.get("YOHO_STORE_PATH", "data/dev_store.pkl"),
             firebase_credentials=os.environ.get("FIREBASE_CREDENTIALS") or None,
             firebase_project_id=os.environ.get("FIREBASE_PROJECT_ID") or None,
             monthly_token_limit=int(os.environ.get("YOHO_MONTHLY_TOKEN_LIMIT", "200000")),
@@ -60,4 +68,6 @@ class Settings:
             webhook_base_url=os.environ.get("YOHO_WEBHOOK_BASE_URL") or None,
             sns_topic_arn=os.environ.get("YOHO_SNS_TOPIC_ARN") or None,
             aws_region=os.environ.get("AWS_REGION") or None,
+            agent_model=os.environ.get("YOHO_AGENT_MODEL") or None,
+            warmup=os.environ.get("YOHO_WARMUP", "1") != "0",
         )

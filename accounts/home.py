@@ -33,8 +33,12 @@ class HomeOutOfArea(ValueError):
     pass
 
 
+def in_service_area(lat: float, lon: float) -> bool:
+    return _LAT_RANGE[0] <= lat <= _LAT_RANGE[1] and _LON_RANGE[0] <= lon <= _LON_RANGE[1]
+
+
 def save_home(store: UserStore, cipher: FieldCipher, uid: str, home: Home) -> None:
-    if not (_LAT_RANGE[0] <= home.lat <= _LAT_RANGE[1] and _LON_RANGE[0] <= home.lon <= _LON_RANGE[1]):
+    if not in_service_area(home.lat, home.lon):
         raise HomeOutOfArea("home must be in the New York City area")
     token = cipher.encrypt_json({"label": home.label, "lat": home.lat, "lon": home.lon}, user_id=uid, field=HOME_FIELD)
     store.update_user(uid, {"home_enc": token})

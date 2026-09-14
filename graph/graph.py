@@ -142,6 +142,7 @@ class Graph:
         transfer_weight: float = 1.0,
         ignore_modes: set[str] | None = None,
         ignore_stops: set[str] | None = None,
+        ignore_routes: set[str] | None = None,
         service_period: str | None = _UNSET,
         start_costs: dict[str, float] | None = None,
         end_ids: set[str] | None = None,
@@ -169,6 +170,9 @@ class Graph:
         subway, stop_id is the platform-level id (e.g. "101S"), not the
         parent station, since that's what ride/transfer edges key off of;
         blocking a whole station complex means listing all its platforms.
+        ignore_routes excludes nodes on those lines/routes (the node's
+        `vehicle`, case-insensitive): {"L"}, {"B38"}. A subway line also
+        excludes its express variant ("6" excludes "6X").
 
         start_costs lets the trip begin at other nodes too, each at a cost
         paid before its first edge -- e.g. the predicted wait for the next
@@ -193,11 +197,17 @@ class Graph:
         if service_period is _UNSET:
             service_period = self.default_period
 
+        routes = {r.upper() for r in ignore_routes} if ignore_routes else set()
+
         def allowed(node: StopNode) -> bool:
             if ignore_modes is not None and node.mode in ignore_modes:
                 return False
             if ignore_stops is not None and node.stop_id in ignore_stops:
                 return False
+            if routes:
+                vehicle = node.vehicle.upper()
+                if vehicle in routes or (node.mode == "subway" and vehicle.endswith("X") and vehicle[:-1] in routes):
+                    return False
             return True
 
         if start_id not in self._nodes or end_id not in self._nodes:
