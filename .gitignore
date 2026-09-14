@@ -1,0 +1,35 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# .venv is a symlink to .venv.nosync (the suffix keeps iCloud from syncing it);
+# no trailing slash, since a dir-only pattern doesn't match a symlink.
+.venv
+.venv.nosync/
+venv/
+env/
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+.env
+.DS_Store
+data/
+*.pt
+ml_model/checkpoints/
+
+logs/
+env.*
+.env*
+!.env.example
+sdn_cache/
+TODO.md
+test_agent.py
+.vscode
+docs/

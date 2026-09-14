@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+{% from "base.html" import wordmark %}
+{% block head %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H" crossorigin="anonymous">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH" crossorigin="anonymous"></script>
+<script src="{{ url_for('static', filename='route_map.js') }}"></script>
+<style>
+html,body{height:100%}
+body{margin:0;overflow:hidden}
+.app{min-height:100vh;height:100vh;display:flex;flex-direction:column;background:var(--color-bg);padding:clamp(14px,3.2vw,30px);box-sizing:border-box;gap:clamp(10px,1.8vw,18px);transition:background .25s}
+.app.dark{background:var(--color-neutral-900)}
+.tiles-mono .leaflet-tile-pane{filter:saturate(.3) contrast(1.15) brightness(1.03)}
+.tiles-dark .leaflet-tile-pane{filter:invert(.9) hue-rotate(180deg) brightness(.92) contrast(1.08) saturate(1.15)}
+/* The tint is a map pane between the tiles and the route (was a div over the whole map, which recolored route lines too). */
+.leaflet-tint-pane{mix-blend-mode:color;pointer-events:none}
+.leaflet-tint-pane path{fill:var(--color-accent-500);fill-opacity:.7;stroke:none}
+.app.dark .leaflet-tint-pane path{fill-opacity:.32}
+.leaflet-control-attribution{background:color-mix(in srgb, var(--color-bg) 75%, transparent) !important;font-size:8.5px !important;padding:1px 4px !important;color:var(--color-text) !important;opacity:.65}
+.app.dark .leaflet-control-attribution{background:color-mix(in srgb, var(--color-neutral-900) 75%, transparent) !important;color:var(--color-neutral-100) !important}
+.leaflet-container{background:var(--color-surface) !important}
+.leaflet-container img{max-width:none !important}
+.frame{position:relative;flex:1;min-height:0;border-radius:var(--radius-lg);overflow:hidden;box-shadow:var(--shadow-lg)}
+.overlay{position:absolute;inset:0;display:flex;flex-direction:column;align-items:flex-end;padding:clamp(14px,2.4vw,26px);pointer-events:none}
+.thread{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:10px;width:min(640px,100%);pointer-events:auto;scrollbar-width:none}
+.thread::-webkit-scrollbar{display:none}
+.dock{width:min(640px,100%);margin-top:10px;pointer-events:auto}
+.bubble-row{display:flex;width:100%}
+.bubble{display:flex;align-items:flex-start;gap:9px;max-width:82%;padding:12px 14px;border-radius:calc(var(--radius-lg)*1.15);box-shadow:var(--shadow-md);backdrop-filter:blur(6px)}
+.bubble.agent{background:color-mix(in srgb, var(--color-bg) 90%, transparent)}
+.bubble.user{background:color-mix(in srgb, var(--color-accent-2-200) 92%, transparent);margin-left:auto}
+.bubble p{margin:0;font-size:13.5px;color:var(--color-text);white-space:pre-wrap}
+.bubble.pending p{opacity:.6}
+.app.dark .bubble.agent{background:color-mix(in srgb, var(--color-neutral-800) 90%, transparent)}
+.app.dark .bubble.user{background:color-mix(in srgb, var(--color-neutral-700) 88%, transparent)}
+.app.dark .bubble p{color:var(--color-neutral-100)}
+.chat-input::placeholder{color:color-mix(in srgb, var(--color-text) 50%, transparent)}
+.app.dark .chat-input{color:var(--color-neutral-100)}
+.app.dark .chat-input::placeholder{color:color-mix(in srgb, var(--color-neutral-100) 55%, transparent)}
+.app.dark .dock{background:var(--color-neutral-800) !important}
+#send-btn{background:var(--color-accent-2)}
+#send-btn:disabled{opacity:.55;cursor:default}
+.app.dark #send-btn{background:var(--color-accent);box-shadow:0 0 14px color-mix(in srgb, var(--color-accent) 65%, transparent)}
+.theme-toggle{border-radius:50%;width:clamp(32px,4.2vw,40px);height:clamp(32px,4.2vw,40px);display:flex;align-items:center;justify-content:center;flex:none;cursor:pointer;background:transparent;border:1px solid var(--color-divider);color:var(--color-text)}
+.theme-toggle:hover{background:color-mix(in srgb, var(--color-text) 7%, transparent)}
+.app.dark .theme-toggle{color:var(--color-neutral-100);border-color:color-mix(in srgb, var(--color-neutral-100) 25%, transparent)}
+.icon-btn-active{background:color-mix(in srgb, var(--color-accent) 18%, transparent);border-color:var(--color-accent);color:var(--color-accent-700)}
+.app.dark .icon-btn-active{background:color-mix(in srgb, var(--color-accent) 32%, transparent);border-color:var(--color-accent);color:var(--color-bg)}
+</style>
+{% endblock %}
+{% block body %}
+<div class="app">
+  <div style="display:flex;align-items:flex-start;justify-content:space-between">
+    {{ wordmark('clamp(28px,4.2vw,40px)', 'clamp(13px,1.9vw,18px)') }}
+    <div style="display:flex;align-items:center;gap:8px">
+      <button id="chat-toggle" class="theme-toggle icon-btn-active" aria-label="Toggle chat">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+      </button>
+      <a class="theme-toggle" href="{{ url_for('pages.profile') }}" aria-label="Profile" style="text-decoration:none">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.5-6 8-6s8 2 8 6"/></svg>
+      </a>
+      <button id="theme-toggle" class="theme-toggle" aria-label="Toggle dark mode"></button>
+    </div>
+  </div>
+
+  <div class="frame">
+    <div id="map" class="tiles-mono" style="position:absolute;inset:0"></div>
+    <div class="overlay">
+      <div class="thread" id="thread" aria-live="polite"></div>
+      <form class="dock" id="dock" style="display:flex;align-items:center;gap:8px;background:var(--color-bg);border-radius:999px;padding:7px 7px 7px 20px;box-shadow:var(--shadow-lg)">
+        <input id="chat-input" class="chat-input input" placeholder="Ask Yoho anything…" maxlength="2000" autocomplete="off" style="border:none;box-shadow:none;flex:1;padding-left:6px;padding-block:0;background:transparent">
+        <button id="send-btn" type="submit" class="btn btn-primary btn-icon" style="border-radius:50%" aria-label="Send">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M13 6l6 6-6 6"/></svg>
+        </button>
+      </form>
+    </div>
+  </div>
+</div>
+
+<script>
+const map=L.map('map',{center:[40.7440,-73.9903],zoom:16,zoomControl:false,dragging:false,scrollWheelZoom:false,doubleClickZoom:false,touchZoom:false,boxZoom:false,keyboard:false});
+L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',{attribution:'Esri, HERE, Garmin, &copy; OpenStreetMap contributors',maxZoom:19}).addTo(map);
+window.addEventListener('resize',()=>map.invalidateSize());
+map.createPane('tint').style.zIndex=250;  // above tiles (200), below the route (450)
+L.rectangle([[-85,-180],[85,180]],{pane:'tint',interactive:false}).addTo(map);
+// Keep the route clear of the chat thread, which covers the right side of the map.
+const routeMap=new RouteMap(map,{padding:[40,Math.min(660,window.innerWidth*0.55),90,40]});
+
+const sunSVG='<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>';
+const moonSVG='<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>';
+const appEl=document.querySelector('.app');
+const mapTileEl=document.getElementById('map');
+const themeBtn=document.getElementById('theme-toggle');
+function setTheme(dark){
+  appEl.classList.toggle('dark',dark);
+  mapTileEl.classList.remove('tiles-mono','tiles-dark');
+  mapTileEl.classList.add(dark?'tiles-dark':'tiles-mono');
+  themeBtn.innerHTML=dark?sunSVG:moonSVG;
+  yohoSaveTheme(dark);
+}
+setTheme(yohoPrefersDark());
+themeBtn.addEventListener('click',()=>setTheme(!appEl.classList.contains('dark')));
+
+const chatToggleBtn=document.getElementById('chat-toggle');
+const overlayEl=document.querySelector('.overlay');
+let chatOpen=true;
+function setChatOpen(open){
+  chatOpen=open;
+  overlayEl.style.display=open?'flex':'none';
+  chatToggleBtn.classList.toggle('icon-btn-active',open);
+  ['dragging','scrollWheelZoom','doubleClickZoom','touchZoom','boxZoom'].forEach(k=>{ open?map[k].disable():map[k].enable(); });
+}
+chatToggleBtn.addEventListener('click',()=>setChatOpen(!chatOpen));
+
+const thread=document.getElementById('thread');
+const input=document.getElementById('chat-input');
+const sendBtn=document.getElementById('send-btn');
+function addBubble(text,fromUser){
+  const row=document.createElement('div'); row.className='bubble-row';
+  const b=document.createElement('div'); b.className='bubble '+(fromUser?'user':'agent');
+  if(!fromUser){
+    const av=document.createElement('span'); av.className='roundel';
+    av.style.width='26px'; av.style.height='26px'; av.style.fontSize='12px'; av.style.background='var(--color-accent-600)';
+    av.textContent='Y'; b.appendChild(av);
+  }
+  const p=document.createElement('p'); p.textContent=text;
+  b.appendChild(p); row.appendChild(b); thread.appendChild(row);
+  thread.scrollTop=thread.scrollHeight;
+  return {row,bubble:b,p};
+}
+addBubble("Hi! Ask me how to get anywhere in the city — or how long it'll take from home.",false);
+
+const ERRORS={
+  token_limit_reached:"You've used this month's Yoho allowance. It resets at the start of next month.",
+  request_in_progress:"Still working on your last message — one moment.",
+  message_too_long:"That message is too long — try a shorter one.",
+};
+let sending=false;
+async function send(e){
+  e.preventDefault();
+  const val=input.value.trim(); if(!val||sending) return;
+  sending=true; sendBtn.disabled=true;
+  addBubble(val,true); input.value='';
+  const pending=addBubble('…',false); pending.bubble.classList.add('pending');
+  try{
+    const data=await yohoApi('/api/chat',{method:'POST',body:{message:val}});
+    pending.p.textContent=data.reply||"Sorry, I didn't get a reply for that.";
+    if(data.route) routeMap.show(data.route);
+  }catch(err){
+    pending.p.textContent=ERRORS[err.message]||"Something went wrong reaching Yoho. Try again.";
+  }finally{
+    pending.bubble.classList.remove('pending');
+    sending=false; sendBtn.disabled=false; input.focus();
+    thread.scrollTop=thread.scrollHeight;
+  }
+}
+document.getElementById('dock').addEventListener('submit',send);
+</script>
+{% endblock %}

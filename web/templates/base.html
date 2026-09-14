@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Yoho{% endblock %}</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+<style>
+.roundel{border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--color-bg);font-family:var(--font-body);font-weight:800;flex:none}
+</style>
+{% block head %}{% endblock %}
+<script src="{{ url_for('static', filename='yoho.js') }}"></script>
+</head>
+<body>
+{% block body %}{% endblock %}
+</body>
+</html>
+
+{% macro wordmark(size='40px', font='18px') -%}
+<div style="display:flex;gap:clamp(3px,.6vw,6px)">
+  {% for letter, color in [('Y','accent-2-600'),('O','accent-600'),('H','accent-2-800'),('O','accent-800')] %}
+  <span class="roundel" style="width:{{ size }};height:{{ size }};font-size:{{ font }};background:var(--color-{{ color }})">{{ letter }}</span>
+  {% endfor %}
+</div>
+{%- endmacro %}

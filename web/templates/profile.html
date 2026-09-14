@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+{% block title %}Profile · Yoho{% endblock %}
+{% block head %}
+<style>
+[hidden]{display:none !important}
+</style>
+{% endblock %}
+{% block body %}
+<div style="min-height:100vh;background:var(--color-bg);padding:var(--space-6) var(--space-4);box-sizing:border-box">
+  <div style="max-width:560px;margin:0 auto;display:flex;flex-direction:column;gap:var(--space-6)">
+    <div style="display:flex;align-items:center;gap:var(--space-3)">
+      <a href="{{ url_for('pages.chat') }}" class="btn btn-ghost btn-icon" aria-label="Back to chat" style="border-radius:50%">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+      </a>
+      <h4 style="margin:0;flex:1">Profile</h4>
+      <form method="post" action="{{ url_for('auth.logout') }}" style="margin:0">
+        <button class="btn btn-ghost" style="font-size:13px">Sign out</button>
+      </form>
+    </div>
+
+    <!-- Account -->
+    <div class="card elev-sm" style="flex-direction:row;align-items:center;gap:var(--space-4);padding:var(--space-4)">
+      <div style="width:56px;height:56px;border-radius:50%;background:var(--color-accent-2-200);display:flex;align-items:center;justify-content:center;flex:none">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent-2-800)" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.5-6 8-6s8 2 8 6"/></svg>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:4px;min-width:0">
+        <div id="name" style="font-family:var(--font-heading);font-size:17px">&nbsp;</div>
+        <div id="email" class="text-muted" style="font-size:13px;overflow-wrap:anywhere"></div>
+        <div id="usage" class="text-muted" style="font-size:12px"></div>
+      </div>
+    </div>
+
+    <!-- Calendar -->
+    <div class="card elev-sm" style="gap:var(--space-3);padding:var(--space-4)">
+      <div class="card-title">Google Calendar</div>
+      <div id="cal-connected" hidden style="display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap">
+        <span class="tag tag-accent-2">Connected to Google Calendar</span>
+        <span id="cal-synced" class="text-muted" style="font-size:12px"></span>
+      </div>
+      <p id="cal-disconnected" hidden class="text-muted" style="font-size:12px;margin:0">Calendar access isn't connected. Reconnect and leave Calendar ticked on Google's consent screen.</p>
+      <div style="display:flex;gap:var(--space-3)">
+        <button id="sync-btn" class="btn btn-secondary" hidden>Sync now</button>
+        <a id="reconnect-btn" class="btn btn-primary" href="{{ url_for('auth.google_login') }}" hidden>Reconnect Google</a>
+      </div>
+    </div>
+
+    <!-- Home -->
+    <div class="card elev-sm" style="gap:var(--space-3);padding:var(--space-4)">
+      <div class="card-title">Home address</div>
+      <p class="text-muted" style="font-size:12px;margin:0">Stored encrypted and used only to calculate travel times from home. It isn't shown again after saving.</p>
+      <div id="home-status" class="tag tag-accent-2" style="width:fit-content" hidden>Home is set</div>
+      <button id="locate-btn" class="btn btn-primary" style="align-self:flex-start;gap:8px">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></svg>
+        Use my current location
+      </button>
+      <p id="home-note" class="text-muted" style="font-size:12px;margin:0" hidden></p>
+      <form id="address-form" style="display:flex;flex-direction:column;gap:var(--space-3);margin:0">
+        <div class="field">
+          <label for="home-addr">Or enter address manually</label>
+          <input id="home-addr" class="input" placeholder="221 Water St, New York, NY" maxlength="200" autocomplete="street-address">
+        </div>
+        <div style="display:flex;align-items:center;gap:var(--space-3)">
+          <button class="btn btn-secondary" type="submit">Save address</button>
+          <button id="clear-home-btn" class="btn btn-ghost" type="button" hidden>Remove home</button>
+        </div>
+      </form>
+    </div>
+
+    <!-- Delete -->
+    <div class="card elev-sm" style="gap:var(--space-2);padding:var(--space-4);border:1px solid color-mix(in srgb, var(--color-accent-800) 30%, transparent)">
+      <div class="card-title" style="color:var(--color-accent-800)">Delete account</div>
+      <p class="card-body" style="opacity:.85">Removes your profile, saved address, and Google Calendar connection. This can't be undone.</p>
+      <button id="delete-btn" class="btn btn-secondary" style="align-self:flex-start;border-color:var(--color-accent-800);color:var(--color-accent-800)">Delete account</button>
+    </div>
+  </div>
+
+  <div id="dialog" class="dialog-backdrop" hidden>
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
+      <div class="dialog-title" id="dialog-title">Delete your account?</div>
+      <div class="dialog-body">This permanently removes your Yoho profile, saved home address, and calendar connection.</div>
+      <div class="dialog-actions">
+        <button id="cancel-delete" class="btn btn-secondary">Cancel</button>
+        <button id="confirm-delete" class="btn btn-primary" style="background:var(--color-accent-800)">Delete</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const HOME_ERRORS={
+  address_not_found:"Couldn't find that address — check it and try again.",
+  outside_service_area:"That location is outside New York City.",
+};
+
+function showNote(text){ $('home-note').textContent=text; $('home-note').hidden=!text; }
+function renderHome(set){ $('home-status').hidden=!set; $('clear-home-btn').hidden=!set; }
+
+async function load(){
+  const me=await yohoApi('/api/me');
+  $('name').textContent=me.name||'Yoho rider';
+  $('email').textContent=me.email||'';
+  $('usage').textContent=`${me.usage.used.toLocaleString()} of ${me.usage.limit.toLocaleString()} tokens used this month`;
+  renderHome(me.home_set);
+  const connected=me.calendar.connected;
+  $('cal-connected').hidden=!connected; $('sync-btn').hidden=!connected;
+  $('cal-disconnected').hidden=connected; $('reconnect-btn').hidden=connected;
+  $('cal-synced').textContent=me.calendar.synced_at?`Last synced ${new Date(me.calendar.synced_at).toLocaleString()}`:'';
+}
+
+async function saveHome(body){
+  showNote('Saving…');
+  try{
+    await yohoApi('/api/me/home',{method:'PUT',body});
+    renderHome(true); showNote(''); $('home-addr').value='';
+  }catch(err){ showNote(HOME_ERRORS[err.message]||"Couldn't save your home. Try again."); }
+}
+
+$('locate-btn').addEventListener('click',()=>{
+  if(!navigator.geolocation){ showNote("Couldn't get your location — enter it manually below."); return; }
+  showNote('Getting your location…');
+  navigator.geolocation.getCurrentPosition(
+    pos=>saveHome({lat:pos.coords.latitude,lon:pos.coords.longitude}),
+    ()=>showNote("Couldn't get your location — enter it manually below."),
+    {enableHighAccuracy:true,timeout:15000}
+  );
+});
+$('address-form').addEventListener('submit',e=>{
+  e.preventDefault();
+  const address=$('home-addr').value.trim(); if(address) saveHome({address});
+});
+$('clear-home-btn').addEventListener('click',async()=>{
+  await yohoApi('/api/me/home',{method:'DELETE'}); renderHome(false);
+});
+
+$('sync-btn').addEventListener('click',async()=>{
+  const btn=$('sync-btn'); btn.disabled=true; btn.textContent='Syncing…';
+  try{
+    const r=await yohoApi('/api/calendar/sync',{method:'POST'});
+    btn.textContent=`Synced ${r.synced} event${r.synced===1?'':'s'}`;
+    await load();
+  }catch(err){ btn.textContent='Sync failed'; if(err.status===409) await load(); }
+  finally{ setTimeout(()=>{ btn.disabled=false; btn.textContent='Sync now'; },2500); }
+});
+
+$('delete-btn').addEventListener('click',()=>{ $('dialog').hidden=false; $('cancel-delete').focus(); });
+$('cancel-delete').addEventListener('click',()=>{ $('dialog').hidden=true; });
+$('confirm-delete').addEventListener('click',async()=>{
+  $('confirm-delete').disabled=true;
+  try{ await yohoApi('/api/me',{method:'DELETE'}); window.location.href='/login'; }
+  catch(_){ $('confirm-delete').disabled=false; }
+});
+
+load();
+</script>
+{% endblock %}

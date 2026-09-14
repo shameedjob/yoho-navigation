@@ -1,0 +1,23 @@
+requests>=2.31
+gtfs-realtime-bindings>=1.0.0
+croniter>=2.0
+strands-agents>=1.55
+torch>=2.14.0
+torch-geometric>=2.8.0
+torch-geometric-temporal>=0.56.2
+pandas>=2.2
+# macOS also needs the OpenMP runtime: brew install libomp
+lightgbm>=4.6
+
+# web service (web/, accounts/, integrations/, storage/)
+flask>=3.1
+gunicorn>=23.0
+google-auth>=2.40
+google-auth-oauthlib>=1.2
+google-api-python-client>=2.170
+firebase-admin>=7.0
+cryptography>=45.0
+pytest>=8.0
+
+# alerts (accounts/alerts.py, integrations/aws/)
+boto3>=1.40
