@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "base.html" import wordmark %}
+{% block viewport %}<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">{% endblock %}
 {% block head %}
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H" crossorigin="anonymous">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH" crossorigin="anonymous"></script>
@@ -9,8 +10,13 @@
 <script src="{{ url_for('static', filename='transit_badges.js') }}"></script>
 <style>
 html,body{height:100%}
-body{margin:0;overflow:hidden}
-.app{min-height:100vh;height:100vh;display:flex;flex-direction:column;background:var(--color-bg);padding:clamp(14px,3.2vw,30px);box-sizing:border-box;gap:clamp(10px,1.8vw,18px);transition:background .25s}
+body{margin:0;overflow:hidden;transition:background .25s}
+/* iOS paints the page background behind the status bar, the rubber-band overscroll and the
+   keyboard, so the dark theme has to reach html/body, not just .app. */
+html.dark,html.dark body{background:var(--color-neutral-900);color-scheme:dark}
+/* viewport-fit=cover lets the page run under the notch and home indicator; the safe-area insets
+   keep the header and dock clear of them. dvh tracks Safari's collapsing toolbars. */
+.app{--pad:clamp(14px,3.2vw,30px);height:100vh;height:100dvh;display:flex;flex-direction:column;background:var(--color-bg);padding:calc(var(--pad) + env(safe-area-inset-top)) max(var(--pad),env(safe-area-inset-right)) calc(var(--pad) + env(safe-area-inset-bottom)) max(var(--pad),env(safe-area-inset-left));box-sizing:border-box;gap:clamp(10px,1.8vw,18px);transition:background .25s}
 .app.dark{background:var(--color-neutral-900)}
 .tiles-mono .leaflet-tile-pane{filter:saturate(.3) contrast(1.15) brightness(1.03)}
 .tiles-dark .leaflet-tile-pane{filter:invert(.9) hue-rotate(180deg) brightness(.92) contrast(1.08) saturate(1.15)}
@@ -129,8 +135,11 @@ const moonSVG='<svg width="17" height="17" viewBox="0 0 24 24" fill="none" strok
 const appEl=document.querySelector('.app');
 const mapTileEl=document.getElementById('map');
 const themeBtn=document.getElementById('theme-toggle');
+const themeColorEl=document.querySelector('meta[name="theme-color"]');
 function setTheme(dark){
   appEl.classList.toggle('dark',dark);
+  document.documentElement.classList.toggle('dark',dark);
+  themeColorEl.content=getComputedStyle(document.documentElement).getPropertyValue(dark?'--color-neutral-900':'--color-bg').trim();
   mapTileEl.classList.remove('tiles-mono','tiles-dark');
   mapTileEl.classList.add(dark?'tiles-dark':'tiles-mono');
   themeBtn.innerHTML=dark?sunSVG:moonSVG;

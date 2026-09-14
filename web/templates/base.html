@@ -2,7 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+{% block viewport %}<meta name="viewport" content="width=device-width, initial-scale=1">{% endblock %}
+<meta name="theme-color" content="#f5ead8">
 <title>{% block title %}Yoho{% endblock %}</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 <style>
