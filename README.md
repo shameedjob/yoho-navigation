@@ -141,7 +141,7 @@ More detail: [ARCHITECTURE.md](ARCHITECTURE.md), and the agent loop:
 ## Running it
 
 ### Prerequisites
-- Python 3.11+
+- Python 3.14 (what it's developed on)
 - A Google Cloud project with the Calendar API enabled and an OAuth **Web application**
   client (redirect `http://localhost:5000/auth/google/callback`; scopes `openid`, `email`,
   `profile`, `calendar.readonly`)
@@ -158,17 +158,48 @@ pip install -r requirements.txt
 ```
 
 ### 2. Data
-`data/` (~1.5 GB) and `ml_model/checkpoints/` (~300 MB) are too large for git.
-- **GTFS static feeds:** download MTA's subway and borough bus GTFS from
-  [MTA developer resources](https://new.mta.info/developers) into `data/gtfs_subway`,
-  `data/gtfs_supplemented`, `data/gtfs_b`, `data/gtfs_bx`, `data/gtfs_m`, `data/gtfs_q`, `data/gtfs_si`.
-- **Transfer tables:** `python -m scripts.bus_transfers` and `python -m scripts.subway_bus_transfers`.
-- **Model checkpoints:** build training data with
-  `python -m scripts.training_data --start 2026-01-01 --end 2026-05-31 --sample-days 30`
-  (see [docs/MODEL_DATA.md](docs/MODEL_DATA.md)), then train with `python -m ml_model.train_gnn`
-  and `python -m ml_model.train_waits`. The app needs `gwnet_joint_2026-sample30_buckets`
-  and `waits_2026-sample30`. Checkpoints are available from the author on request.
-- Without checkpoints, routing still works from the static schedule plus live first-train waits.
+`data/` (~1.5 GB) and `ml_model/checkpoints/` (~300 MB) are too large for git. Rebuild
+them as follows, from the repo root.
+
+**a. MTA static GTFS (required, a few minutes)**
+```bash
+mkdir -p data
+for feed in gtfs_subway gtfs_supplemented gtfs_b gtfs_bx gtfs_m gtfs_q gtfs_si; do
+  curl -L -o /tmp/$feed.zip https://rrgtfsfeeds.s3.amazonaws.com/$feed.zip
+  unzip -o -q /tmp/$feed.zip -d data/$feed
+done
+```
+
+**b. Transfer tables (required)**
+```bash
+python -m scripts.bus_transfers          # -> data/processed/bus_transfers.csv
+python -m scripts.subway_bus_transfers   # -> data/processed/subway_bus_transfers.csv
+```
+
+**c. Training data and models (optional, hours)**
+
+Skip this and the app still runs: routes are priced from the schedule plus live
+first-train waits. These steps add the delay model.
+```bash
+pip install -r requirements-training.txt
+
+mkdir -p data/training
+# 30 sampled service days of historical subway trips (subwaydata.nyc + MTA schedule data)
+python -m scripts.training_data --start 2026-01-01 --end 2026-05-31 --sample-days 30 \
+  --out data/training/training_data_2026-sample30.csv
+
+# Typical headways + wait models -> typical_headway.csv used by the snapshot service
+python -m ml_model.train_waits --data data/training/training_data_2026-sample30.csv \
+  --out ml_model/checkpoints/waits_2026-sample30
+
+# Joint Graph WaveNet (rides + transfers), the model the agent loads (~110 s/epoch)
+python -m ml_model.train_gat --architecture gwnet --with-transfers \
+  --data data/training/training_data_2026-sample30.csv \
+  --checkpoint ml_model/checkpoints/gwnet_joint_2026-sample30_buckets/gwnet.pt
+```
+The agent loads the checkpoint from `GRAPH_MODEL_PATH` (default above). Column contract:
+[docs/MODEL_DATA.md](docs/MODEL_DATA.md); training/live feature parity:
+[docs/FEATURE_PARITY.md](docs/FEATURE_PARITY.md).
 
 ### 3. Configure
 ```bash
@@ -184,6 +215,7 @@ Use `YOHO_STORE=file` locally; use `firestore` when the web app and scheduler ru
 ### 4. Run (three processes)
 ```bash
 # Live MTA snapshot service. Give it ~30 min to warm up for good predictions.
+# Drop --typical-headways if you skipped step 2c.
 python -m snapshot.service --port 8791 \
   --typical-headways ml_model/checkpoints/waits_2026-sample30/typical_headway.csv
 
