@@ -5,8 +5,6 @@
 Built with the [Strands Agents SDK](https://strandsagents.com) and Amazon Bedrock for the
 *Agents for Humans* hackathon (Everyday Agents track).
 
-🔗 **Live demo:** `<LIVE_URL>` · 🎥 **Video:** `<VIDEO_URL>`
-
 ---
 
 ## The problem
