@@ -246,7 +246,7 @@ python -m pytest tests/
 - **Sign-in:** use the demo Google account in the Devpost testing instructions. It has
   sample calendar events with locations.
 - **Try:** set Home on the profile page, then ask
-  *"When should I leave to get to 41 E 56th St, Manhattan by 7 PM?"*
+  *"When should I leave to get to Central Park by 7 PM?"*
 - Use street addresses rather than landmark names for the most reliable geocoding.
 
 ## Built with
