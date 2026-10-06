@@ -23,7 +23,7 @@ percentile), not the optimistic schedule, and it reaches out first when it's tim
 
 ## What it does
 
-- **Chat with a transit agent.** Ask "When should I leave to get to 41 E 56th St by 7 PM?"
+- **Chat with a transit agent.** Ask "When should I leave to get to Times Square by 7 PM?"
   and get a leave-by time, step-by-step directions, and the route drawn on a map.
 - **Calendar-aware.** Sign in with Google and Yoho reads your calendar (read-only). It
   knows where you'll be: routes start from your current event's location, or from home.
